@@ -1485,6 +1485,7 @@ def keys(
     # environment config
     env_size: int = 15,
     env_layout: str = 'blocks',
+    env_wall_prob: float = 0.25,
     env_num_keys: int = 3,
     env_num_keys_shift: int = 15,
     env_num_chests: int = 15,
@@ -1575,9 +1576,15 @@ def keys(
 
 
     print("configuring level generators...")
-    maze_generator = maze_generation.get_generator_class_from_name(
+    maze_generator_class = maze_generation.get_generator_class_from_name(
         name=env_layout,
-    )()
+    )
+    if env_layout == "blocks":
+        maze_generator = maze_generator_class(
+            wall_prob=env_wall_prob,
+        )
+    else:
+        maze_generator = maze_generator_class()
     env_num_keys_max = max(env_num_keys, env_num_keys_shift)
     env_num_chests_max = max(env_num_chests, env_num_chests_shift)
     orig_level_generator = keys_and_chests.LevelGenerator(

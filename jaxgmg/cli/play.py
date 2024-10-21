@@ -260,10 +260,10 @@ def keys(
     height: int                 = 9,
     width: int                  = 9,
     layout: str                 = 'tree',
-    num_keys_min: int           = 2,
-    num_keys_max: int           = 6,
-    num_chests_min: int         = 6,
-    num_chests_max: int         = 6,
+    num_keys: int               = 1,
+    num_keys_max: int           = 5,
+    num_chests: int             = 5,
+    num_chests_max: int         = 5,
     level_of_detail: int        = 8,
     seed: int                   = 42,
     split_channels: bool        = False,
@@ -283,11 +283,11 @@ def keys(
         height=height,
         width=width,
         maze_generator=maze_generation.get_generator_class_from_name(
-            name=layout
+            name=layout,
         )(),
-        num_keys_min=num_keys_min,
+        num_keys=num_keys,
         num_keys_max=num_keys_max,
-        num_chests_min=num_chests_min,
+        num_chests=num_chests,
         num_chests_max=num_chests_max,
     )
     play_forever(
