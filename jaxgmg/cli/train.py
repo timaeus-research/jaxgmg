@@ -1639,6 +1639,21 @@ def keys(
             "shift": shift_level_generator,
         }
 
+    print("configuring level mutator...")
+
+    level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ToggleWallLevelMutator(),
+                    keys_and_chests.ScatterMouseLevelMutator(),
+                    keys_and_chests.ScatterChestLevelMutator(),
+                    keys_and_chests.ScatterKeyLevelMutator(),
+                ),
+                mixing_probs=(7/12, 1/12, 2/12, 2/12),
+            ),
+            num_steps=num_mutate_steps,
+        )
+
 
     print("TODO: implement level solver...")
 
@@ -1661,7 +1676,7 @@ def keys(
         env=env,
         train_level_generator=train_level_generator,
         level_solver=None,
-        level_mutator=None,
+        level_mutator=level_mutator,
         level_metrics=level_metrics,
         eval_level_generators=eval_level_generators,
         fixed_eval_levels={},

@@ -663,6 +663,210 @@ class LevelGenerator(base.LevelGenerator):
         )
 
 
+### Level Mutation
+@struct.dataclass
+class ToggleWallLevelMutator(base.LevelMutator):
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
+        h, w = level.wall_map.shape
+        # TODO: assuming (h-2)*(w-2) > 2 or something
+        
+        # which walls are available to toggle?
+        valid_map = jnp.ones((h, w), dtype=bool)
+        # exclude border
+        valid_map = valid_map.at[(0, h-1), :].set(False)
+        valid_map = valid_map.at[:, (0, w-1)].set(False)
+        # exclude current keys,-chests, mouse spawn positions
+        for chest_pos, key_pos in zip(level.chests_pos.T, level.keys_pos.T):
+                valid_map = valid_map.at[
+                            (chest_pos[0], key_pos[0], level.initial_mouse_pos[0]),
+                            (chest_pos[1], key_pos[1], level.initial_mouse_pos[1])
+                ].set(False)
+        valid_mask = valid_map.flatten()
+
+        # pick a random valid position
+        coords = einops.rearrange(jnp.indices((h, w)), 'c h w -> (h w) c')
+        toggle_pos = jax.random.choice(
+            key=rng,
+            a=coords,
+            axis=0,
+            p=valid_mask,
+        )
+
+        # toggle the wall there
+        hit_wall = level.wall_map[toggle_pos[0], toggle_pos[1]]
+        new_wall_map = level.wall_map.at[
+            toggle_pos[0],
+            toggle_pos[1],
+        ].set(~hit_wall)
+
+        return level.replace(wall_map=new_wall_map)
+
+@struct.dataclass
+class ScatterMouseLevelMutator(base.LevelMutator):
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
+        h, w = level.wall_map.shape
+
+        # teleport the mouse to a random location within bounds
+        rng_row, rng_col = jax.random.split(rng)
+        new_mouse_row = jax.random.choice(
+            key=rng_row,
+            a=jnp.arange(1, h-1),
+        )
+        new_mouse_col = jax.random.choice(
+            key=rng_col,
+            a=jnp.arange(1, w-1),
+        )
+        new_initial_mouse_pos = jnp.array((
+            new_mouse_row,
+            new_mouse_col,
+        ))
+
+        # carve through walls
+        new_wall_map = level.wall_map.at[
+            new_initial_mouse_pos[0],
+            new_initial_mouse_pos[1],
+        ].set(False)
+
+        # resolve collision with cheese
+        hit_chest = ((new_initial_mouse_pos == level.chests_pos).all()).any()
+        new_chests_pos = level.chests_pos
+        new_initial_mouse_pos = jax.lax.select(
+            hit_chest,
+            level.initial_mouse_pos,
+            new_initial_mouse_pos
+        )
+
+        hit_key = ((new_initial_mouse_pos == level.keys_pos).all()).any()
+        new_keys_pos = level.keys_pos
+        new_initial_mouse_pos = jax.lax.select(
+            hit_chest,
+            level.initial_mouse_pos,
+            new_initial_mouse_pos
+        )
+
+
+
+        return level.replace(
+            wall_map=new_wall_map,
+            initial_mouse_pos=new_initial_mouse_pos,
+            keys_pos=new_keys_pos,
+            chests_pos=new_chests_pos,
+        )
+
+
+@struct.dataclass
+class ScatterKeyLevelMutator(base.LevelMutator):
+
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
+        h, w = level.wall_map.shape
+
+        # teleport key to a random location within bounds
+        rng_row, rng_col, rng_key = jax.random.split(rng, num=3)
+        selected_key = jax.random.choice(
+            key = rng_key,
+            a = jnp.arange(0, level.keys_pos.shape[0]-1)
+        )
+        new_key_row = jax.random.choice(
+            key=rng_row,
+            a=jnp.arange(1, h-1),
+        )
+        new_key_col = jax.random.choice(
+            key=rng_col,
+            a=jnp.arange(1, w-1),
+        )
+        new_key_pos = jnp.array((
+            new_key_row,
+            new_key_col,
+        ))
+
+        new_keys_pos = level.keys_pos.at[selected_key].set(new_key_pos)
+
+        # carve through walls
+        new_wall_map = level.wall_map.at[
+            new_key_pos[0],
+            new_key_pos[1],
+        ].set(False)
+
+        # upon collision with mouse, transpose key with mouse
+        hit_mouse = (new_key_pos == level.initial_mouse_pos).all()
+        new_initial_mouse_pos = jax.lax.select(
+            hit_mouse,
+            level.keys_pos[selected_key],
+            level.initial_mouse_pos,
+        )
+
+        # upon collision with a chest, swap the key and the chest
+        new_chests_pos = jnp.where((level.chests_pos == new_keys_pos), level.keys_pos, level.chests_pos )
+        
+
+
+        return level.replace(
+            wall_map=new_wall_map,
+            initial_mouse_pos=new_initial_mouse_pos,
+            keys_pos=new_keys_pos,
+            chests_pos=new_chests_pos,
+
+        )
+
+@struct.dataclass
+class ScatterChestLevelMutator(base.LevelMutator):
+
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
+        h, w = level.wall_map.shape
+
+        # teleport the chest to a random location within bounds
+        rng_row, rng_col, rng_chest = jax.random.split(rng, num=3)
+        selected_chest = jax.random.choice(
+            key = rng_chest,
+            a = jnp.arange(0, level.chests_pos.shape[0]-1)
+        )
+        new_chest_row = jax.random.choice(
+            key=rng_row,
+            a=jnp.arange(1, h-1),
+        )
+        new_chest_col = jax.random.choice(
+            key=rng_col,
+            a=jnp.arange(1, w-1),
+        )
+        new_chest_pos = jnp.array((
+            new_chest_row,
+            new_chest_col,
+        ))
+
+        new_chests_pos = level.chests_pos.at[selected_chest].set(new_chest_pos)
+
+        # carve through walls
+        new_wall_map = level.wall_map.at[
+            new_chest_pos[0],
+            new_chest_pos[1],
+        ].set(False)
+
+        # upon collision with mouse, transpose key with mouse
+        hit_mouse = (new_chest_pos == level.initial_mouse_pos).all()
+        new_initial_mouse_pos = jax.lax.select(
+            hit_mouse,
+            level.chests_pos[selected_chest],
+            level.initial_mouse_pos,
+        )
+
+        # upon collision with a chest, swap the key and the chest
+        new_keys_pos = jnp.where((level.keys_pos == new_chest_pos), level.chests_pos, level.keys_pos )
+
+        return level.replace(
+            wall_map=new_wall_map,
+            initial_mouse_pos=new_initial_mouse_pos,
+            keys_pos=new_keys_pos,
+            chests_pos = new_chests_pos,
+
+        )
 # # # 
 # Level parsing
 
