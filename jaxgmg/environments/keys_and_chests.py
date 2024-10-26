@@ -33,7 +33,7 @@ import chex
 from jaxtyping import PyTree
 
 from jaxgmg.procgen import maze_generation as mg
-from jaxgmg.procgen import maze_solving
+from jaxgmg.procgen import maze_solving, combinatorix
 from jaxgmg.environments import base
 
 
@@ -403,158 +403,6 @@ class Env(base.Env):
         return self._render_obs_rgb(state, spritesheet).image
 
 
-    @functools.partial(jax.jit, static_argnames=('self',))
-    def optimal_value(
-        self,
-        level: Level,
-        discount_rate: float,
-    ) -> float:
-        """
-        Compute the optimal return from a given level (initial state) for a
-        given discount rate. Respects time penalties to the reward and max
-        episode length.
-
-        The approach is simplistic---brute force & vectorised evaluation of
-        all Hamiltonian paths through the abstract key/chest network and
-        select the best one. This will be enough for small numbers of keys
-        and chests, but will not scale well in time or memory requirements.
-
-        Parameters:
-
-        * level : Level
-                The level to compute the optimal value for. Depends on the
-                wall configuration, the initial agent location, and the
-                location of each key and chest.
-        * discount_rate : float
-                The discount rate to apply in the formula for computing
-                return.
-        * The output also depends on the environment's reward function, which
-          depends on `self.penalize_time` and `self.max_steps_in_episode`.
-
-        Notes:
-
-        * With a steep discount rate or long episodes, this algorithm might
-          run into minor numerical issues where small contributions to the
-          return from late into the episode are lost.
-        * With many keys and chests, the algorithm mighy be slow to compile
-          and run and may use a lot of memory. This is because it relies on
-          a brute force approach of statically generating and then processing
-          a factorial number of key/chest visitation sequences.
-        
-        TODO:
-
-        * Support computing the return from arbitrary states. This would be
-          not too much harder, requiring I think just the following:
-          * Use the current mouse position instead of the initial one.
-          * Mask out keys and chests that have already been collected.
-          * Initialise the simulation using the current number of
-            collected/unused keys (rather than 0).
-          * Decrease time remaining from max by current number of steps.
-        * Find a more clever way to generate only feasibly optimal solutions,
-          such as by considering only combinations of the maximum available
-          number of (non-hidden) chests and the correponding number of
-          (non-hidden) keys, and in an order that also ensures the chests are
-          visited when the inventory is nonempty (like balanced parentheses).
-        * Generally there is a lot more redundant computation going on here,
-          for example the return over subsequences are repeatedly computed
-          many times, it should be possible to speed things up with a dynamic
-          programming approach, and this might even be somewhat jittable.
-        
-        Having said all that---seems like this will be enough for now.
-        """
-        # compute distances between the mouse, and each key, and each chest
-        dist = maze_solving.maze_distances(level.wall_map)
-        pos = jnp.concatenate((
-            level.initial_mouse_pos[jnp.newaxis],
-            level.keys_pos,
-            level.chests_pos,
-        ))
-        D = dist[pos[:,0],pos[:,1],pos[:,[0]],pos[:,[1]]]
-
-        # (statically) generate a vector of possible visitation sequences
-        # * each is a vector of indices into the above distance matrix
-        # * the vectors are 1-based because index 0 in the distance matrix
-        #   represents the mouse, the implicit start of all visitation
-        #   sequences
-        num_keys, _2 = level.keys_pos.shape
-        num_chests, _2 = level.chests_pos.shape
-        visitation_sequences = jnp.array(
-            list(itertools.permutations(range(1, 1+num_keys+num_chests))),
-            dtype=int,
-        )
-
-        # step through each visitation sequence in parallel, computing the
-        # return value for that sequence
-        num_sequences, _ = visitation_sequences.shape
-        initial_carry = (
-            jnp.zeros(num_sequences),            # path length so far
-            jnp.zeros(num_sequences),            # return so far
-            jnp.zeros(num_sequences, dtype=int), # idx of prev visited thing
-            jnp.zeros(num_sequences, dtype=int), # inventory num keys so far
-        )
-        def _step(carry, visit_id):
-            length, value, last_visit_id, inventory = carry
-            
-            # keep track of how many steps
-            dist = D[last_visit_id, visit_id]
-            new_length = length + dist
-
-            # if we hit a chest, and we have a key, provide reward (1)
-            hit_chest = (visit_id >= 1 + num_keys)
-            hit_real_chest = (
-                hit_chest
-                & ~level.hidden_chests[visit_id-1-num_keys]
-                # note: invalid index if hit_chest is false, ok because of &
-            )
-            has_key = (inventory > 0)
-            reward = (hit_real_chest & has_key).astype(float)
-            # optional time penalty to reward
-            penalized_reward = jnp.where(
-                self.penalize_time,
-                (1.0 - 0.9 * new_length / self.max_steps_in_episode) * reward,
-                reward,
-            )
-            # mask out rewards beyond the end of the episode
-            episodes_still_valid = (new_length < self.max_steps_in_episode)
-            valid_reward = penalized_reward * episodes_still_valid
-            # contribute to return
-            discounted_reward = (discount_rate ** new_length) * valid_reward
-            new_value = value + discounted_reward
-
-            # if we hit a key, gain a key; if we hit a chest, use a key
-            hit_key = (visit_id >= 1) & (visit_id <= num_keys)
-            hit_real_key = (
-                hit_key
-                & ~level.hidden_keys[visit_id-1]
-                # note: invalid index if hit_key is false, ok because of &
-            )
-            new_inventory = (
-                inventory
-                + hit_real_key
-                - (hit_real_chest & has_key)
-            )
-
-            new_carry = (
-                new_length,
-                new_value,
-                visit_id,
-                new_inventory,
-            )
-            return new_carry, None
-
-        final_carry, _ = jax.lax.scan(
-            _step,
-            initial_carry,
-            visitation_sequences.T,
-        )
-        
-        # the highest return among all of these sequences must be the optimal
-        # return
-        _, values, _, _ = final_carry
-        
-        return values.max()
-
-
 # # # 
 # Level generator
 
@@ -663,10 +511,13 @@ class LevelGenerator(base.LevelGenerator):
         )
 
 
-### Level Mutation
+# # #
+# Level Mutation
+
+
 @struct.dataclass
 class ToggleWallLevelMutator(base.LevelMutator):
-
+    
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -677,8 +528,6 @@ class ToggleWallLevelMutator(base.LevelMutator):
         # exclude border
         valid_map = valid_map.at[(0, h-1), :].set(False)
         valid_map = valid_map.at[:, (0, w-1)].set(False)
-
-
 
         # exclude current keys,-chests, mouse spawn positions
         for chest_pos, key_pos in zip(level.chests_pos.T, level.keys_pos.T):
@@ -716,6 +565,7 @@ class ToggleWallLevelMutator(base.LevelMutator):
         ].set(~hit_wall)
 
         return level.replace(wall_map=new_wall_map)
+
 
 @struct.dataclass
 class ScatterMouseLevelMutator(base.LevelMutator):
@@ -769,9 +619,6 @@ class ScatterMouseLevelMutator(base.LevelMutator):
             new_initial_mouse_pos
         )
         
-        
-
-
         return level.replace(
             wall_map=new_wall_map,
             initial_mouse_pos=new_initial_mouse_pos,
@@ -782,7 +629,6 @@ class ScatterMouseLevelMutator(base.LevelMutator):
 
 @struct.dataclass
 class ScatterKeyLevelMutator(base.LevelMutator):
-
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
@@ -833,22 +679,19 @@ class ScatterKeyLevelMutator(base.LevelMutator):
             level.initial_mouse_pos,
         )
 
-
         # upon collision with a chest, swap the key and the chest
         new_chests_pos = jnp.where((level.chests_pos == new_keys_pos), level.keys_pos, level.chests_pos )
         
-
         return level.replace(
             wall_map=new_wall_map,
             initial_mouse_pos=new_initial_mouse_pos,
             keys_pos=new_keys_pos,
             chests_pos=new_chests_pos,
-
         )
+
 
 @struct.dataclass
 class ScatterChestLevelMutator(base.LevelMutator):
-
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
@@ -908,6 +751,8 @@ class ScatterChestLevelMutator(base.LevelMutator):
             chests_pos = new_chests_pos,
 
         )
+
+
 # # # 
 # Level parsing
 
@@ -1043,6 +888,272 @@ class LevelParser(base.LevelParser):
 
 
 # # # 
+# Level valuation
+
+
+@functools.partial(jax.jit, static_argnames=('env',))
+def optimal_value(
+    level: Level,
+    discount_rate: float,
+    env: Env,
+) -> float:
+    """
+    Compute the optimal return from a given level (initial state) for a
+    given discount rate. Respects time penalties to the reward and max
+    episode length.
+
+    The approach is simplistic---vectorised evaluation of all Dyck paths
+    through the abstract key/chest position network, and select the best
+    one.
+    This will be enough for small numbers of keys and chests, but will not
+    scale well in time or memory requirements.
+
+    Parameters:
+
+    * level : Level
+            The level to compute the optimal value for. Depends on the
+            wall configuration, the initial agent location, and the
+            location of each key and chest.
+    * discount_rate : float
+            The discount rate to apply in the formula for computing
+            return.
+    * env : Env
+            The output also depends on the environment's reward function,
+            in turn on:
+            * `env.penalize_time` and
+            * `env.max_steps_in_episode`.
+
+    Notes:
+
+    * With a steep discount rate or long episodes, this algorithm might
+      run into minor numerical issues where small contributions to the
+      return from late into the episode are lost.
+    * With many keys and chests, the algorithm mighy be slow to compile
+      and run and may use a lot of memory. This is because it relies on
+      a brute force approach of statically generating and then processing
+      a large number of possible key/chest visitation sequences.
+    
+    TODO:
+
+    * Support computing the return from arbitrary states. This would be
+      somewhat harder, requiring I think the following:
+      * Use the current mouse position instead of the initial one.
+      * Mask out keys and chests that have already been collected.
+      * Initialise the simulation using the current number of
+        collected/unused keys (rather than 0).
+      * Decrease time remaining from max by current number of steps.
+    """
+    K, _2 = level.keys_pos.shape
+    C, _2 = level.chests_pos.shape
+    N = min(K, C)
+
+    # compute the abstract distance graph: the distance between the mouse,
+    # each key, and each chest
+    dist = maze_solving.maze_distances(level.wall_map)
+    pos = jnp.concatenate((
+        level.initial_mouse_pos[jnp.newaxis],
+        level.keys_pos,
+        level.chests_pos,
+    ))
+    D = dist[
+        pos[:,0],
+        pos[:,1],
+        pos[:,[0]],
+        pos[:,[1]],
+    ]
+    # D has the following rows/cols, with three segments:
+    #   0    |    1     ...     K    |    K+1           K+C
+    # mouse  |  key_1   ...   key_K  |  chest_1  ...  chest_C
+    
+    # let a 'visitation sequence' be a triple:
+    # * some sequence of N keys to visit in order
+    # * some sequence of N chests to visit in order
+    # * some sequence of balanced parentheses describing how to interleave
+    #   the two sequences (encoded as bools, false=key, true=chest)
+    # then given such a triple we can simulate the mouse's path through the
+    # environment and figure out how much reward it would get
+
+    def eval(seq_keys, seq_chests, seq_key_or_chest):
+        @struct.dataclass
+        class _Carry:
+            # mouse state
+            current_node: int           = 0  # index into D, init at spawn
+            num_keys_in_inv: int        = 0  # init empty
+            # visitation sequence state
+            keys_visited: int           = 0  # index into seq_keys
+            chests_visited: int         = 0  # index into seq_chests
+            # evaluation state
+            cumulative_distance: float  = 0. # float to handle infinities
+            cumulative_reward: float    = 0.
+        
+        # simulate one step of the path
+        def _step(carry, chest_step):
+            key_step = ~chest_step
+
+            # where to next?
+            next_node = jnp.where(
+                chest_step,
+                seq_chests[carry.chests_visited],
+                seq_keys[carry.keys_visited],
+            )
+            
+            # how many maze steps
+            distance = D[carry.current_node, next_node]
+            new_cumulative_distance = carry.cumulative_distance + distance
+            
+            # logic for key step:
+            get_key = key_step & ~level.hidden_keys[next_node-1]
+
+            # logic for chest step:
+            has_key = (carry.num_keys_in_inv > 0)
+            hit_chest = chest_step & ~level.hidden_chests[next_node-K-1]
+            use_key = has_key & hit_chest
+
+            # compute reward with various modified
+            raw_reward = use_key.astype(float)
+            discount = discount_rate ** new_cumulative_distance
+            penalty = (
+                1.0
+                - env.penalize_time * 0.9 * new_cumulative_distance / env.max_steps_in_episode
+            )
+            truncation = (new_cumulative_distance < env.max_steps_in_episode)
+            reward = raw_reward * discount * penalty * truncation
+
+            # update the carry
+            new_carry = _Carry(
+                current_node=next_node,
+                num_keys_in_inv=carry.num_keys_in_inv + get_key - use_key,
+                keys_visited=carry.keys_visited + key_step,
+                chests_visited=carry.chests_visited + chest_step,
+                cumulative_distance=new_cumulative_distance,
+                cumulative_reward=carry.cumulative_reward + reward,
+            )
+            return new_carry, None
+
+        # scan _step over seq_key_or_chest
+        final_carry, _out = jax.lax.scan(_step, _Carry(), seq_key_or_chest)
+        return final_carry.cumulative_reward
+
+    # it remains to enumerate visitation sequences that could plausibly be
+    # optimal and vmap the evaluation function over them:
+    seqs_keys = 1 + combinatorix.permutations(K, N)
+    seqs_chests = 1 + K + combinatorix.permutations(C, N)
+    seqs_which = combinatorix.associations(N).astype(bool)
+
+    veval = jax.vmap(eval, in_axes=(None, None, 0))      # :   N,   N, k 2N ->     k
+    vveval = jax.vmap(veval, in_axes=(None, 0, None))    # :   N, j N, k 2N ->   j k
+    vvveval = jax.vmap(vveval, in_axes=(0, None, None))  # : i N, j N, k 2N -> i j k
+    values = vvveval(seqs_keys, seqs_chests, seqs_which) # -> i j k
+
+    return values.max()
+
+
+@functools.partial(jax.jit, static_argnames=('env',))
+def original_optimal_value(
+    level: Level,
+    discount_rate: float,
+    env: Env,
+) -> float:
+    # compute the abstract distance graph: the distance between the mouse,
+    # each key, and each chest
+    dist = maze_solving.maze_distances(level.wall_map)
+    pos = jnp.concatenate((
+        level.initial_mouse_pos[jnp.newaxis],
+        level.keys_pos,
+        level.chests_pos,
+    ))
+    D = dist[
+        pos[:,0],
+        pos[:,1],
+        pos[:,[0]],
+        pos[:,[1]],
+    ]
+
+    # (statically) generate a vector of possible visitation sequences
+    # * each is a vector of indices into the above distance matrix
+    # * the vectors are 1-based because index 0 in the distance matrix
+    #   represents the mouse, the implicit start of all visitation
+    #   sequences
+    num_keys, _2 = level.keys_pos.shape
+    num_chests, _2 = level.chests_pos.shape
+    visitation_sequences = jnp.array(
+        list(itertools.permutations(range(1, 1+num_keys+num_chests))),
+        dtype=int,
+    )
+
+    # step through each visitation sequence in parallel, computing the
+    # return value for that sequence
+    num_sequences, _ = visitation_sequences.shape
+    initial_carry = (
+        jnp.zeros(num_sequences),            # path length so far
+        jnp.zeros(num_sequences),            # return so far
+        jnp.zeros(num_sequences, dtype=int), # idx of prev visited thing
+        jnp.zeros(num_sequences, dtype=int), # inventory num keys so far
+    )
+    def _step(carry, visit_id):
+        length, value, last_visit_id, inventory = carry
+        
+        # keep track of how many steps
+        dist = D[last_visit_id, visit_id]
+        new_length = length + dist
+
+        # if we hit a chest, and we have a key, provide reward (1)
+        hit_chest = (visit_id >= 1 + num_keys)
+        hit_real_chest = (
+            hit_chest
+            & ~level.hidden_chests[visit_id-1-num_keys]
+            # note: invalid index if hit_chest is false, ok because of &
+        )
+        has_key = (inventory > 0)
+        reward = (hit_real_chest & has_key).astype(float)
+        # optional time penalty to reward
+        penalized_reward = jnp.where(
+            env.penalize_time,
+            (1.0 - 0.9 * new_length / env.max_steps_in_episode) * reward,
+            reward,
+        )
+        # mask out rewards beyond the end of the episode
+        episodes_still_valid = (new_length < env.max_steps_in_episode)
+        valid_reward = penalized_reward * episodes_still_valid
+        # contribute to return
+        discounted_reward = (discount_rate ** new_length) * valid_reward
+        new_value = value + discounted_reward
+
+        # if we hit a key, gain a key; if we hit a chest, use a key
+        hit_key = (visit_id >= 1) & (visit_id <= num_keys)
+        hit_real_key = (
+            hit_key
+            & ~level.hidden_keys[visit_id-1]
+            # note: invalid index if hit_key is false, ok because of &
+        )
+        new_inventory = (
+            inventory
+            + hit_real_key
+            - (hit_real_chest & has_key)
+        )
+
+        new_carry = (
+            new_length,
+            new_value,
+            visit_id,
+            new_inventory,
+        )
+        return new_carry, None
+
+    final_carry, _ = jax.lax.scan(
+        _step,
+        initial_carry,
+        visitation_sequences.T,
+    )
+    
+    # the highest return among all of these sequences must be the optimal
+    # return
+    _, values, _, _ = final_carry
+    
+    return values.max()
+
+
+# # # 
 # Level complexity metrics
 
 
@@ -1127,4 +1238,5 @@ class LevelMetrics(base.LevelMetrics):
                 'num_reachable_chests_avg': num_reachable_chests.mean(),
             },
         }
+
 

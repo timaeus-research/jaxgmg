@@ -427,7 +427,6 @@ class LevelGenerator(base.LevelGenerator):
 @struct.dataclass
 class ToggleWallLevelMutator(base.LevelMutator):
 
-
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -467,7 +466,6 @@ class ToggleWallLevelMutator(base.LevelMutator):
 @struct.dataclass
 class StepMouseLevelMutator(base.LevelMutator):
     transpose_with_cheese_on_collision: bool
-
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
@@ -530,7 +528,6 @@ class StepMouseLevelMutator(base.LevelMutator):
 class ScatterMouseLevelMutator(base.LevelMutator):
     transpose_with_cheese_on_collision: bool
 
-
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -586,7 +583,6 @@ class StepCheeseLevelMutator(base.LevelMutator):
     # TODO: restrict to a designated region
     # TODO: make it optional to transpose with the mouse
 
-
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -638,7 +634,6 @@ class StepCheeseLevelMutator(base.LevelMutator):
 class ScatterCheeseLevelMutator(base.LevelMutator):
     # TODO: restrict to a designated region
 
-
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -683,7 +678,6 @@ class ScatterCheeseLevelMutator(base.LevelMutator):
 class CornerCheeseLevelMutator(base.LevelMutator):
     corner_size: int
 
-
     @functools.partial(jax.jit, static_argnames=["self"])
     def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
         h, w = level.wall_map.shape
@@ -721,8 +715,6 @@ class CornerCheeseLevelMutator(base.LevelMutator):
         #     level.cheese_pos,
         # )
         
-        
-            
         # upon collision with mouse, transpose cheese with mouse
         hit_mouse = (new_cheese_pos == level.initial_mouse_pos).all()
         new_initial_mouse_pos = jax.lax.select(
@@ -731,13 +723,13 @@ class CornerCheeseLevelMutator(base.LevelMutator):
             level.initial_mouse_pos,
         )
         
-
         return level.replace(
             wall_map=new_wall_map,
             initial_mouse_pos=new_initial_mouse_pos,
             cheese_pos=new_cheese_pos,
         )
-    
+
+
 @struct.dataclass
 class FixedCheeseLevelMutator(base.LevelMutator):
 

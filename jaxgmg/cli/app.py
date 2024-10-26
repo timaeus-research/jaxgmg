@@ -170,7 +170,7 @@ app.add_typer(make_typer_app(
         solve.corner,
         # solve.dish, # not yet implemented
         # solve.follow, # not yet implemented
-        # solve.keys, # not yet implemented
+        solve.keys,
         # solve.lava, # not yet implemented
         # solve.monsters, # not yet implemented
     ),

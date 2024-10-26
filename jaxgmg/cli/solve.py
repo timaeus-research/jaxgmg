@@ -9,7 +9,7 @@ from jaxgmg.procgen import maze_generation
 from jaxgmg.environments import base
 from jaxgmg.environments import cheese_in_the_corner
 # from jaxgmg.environments import cheese_on_a_dish
-# from jaxgmg.environments import keys_and_chests
+from jaxgmg.environments import keys_and_chests
 # from jaxgmg.environments import monster_world
 # from jaxgmg.environments import lava_land
 # from jaxgmg.environments import follow_me
@@ -111,4 +111,69 @@ def corner(
         fps=fps,
         debug=debug,
     )
+
+
+def keys(
+    height: int                 = 13,
+    width: int                  = 13,
+    layout: str                 = 'blocks',
+    solver: str                 = 'exact', # or 'heuristic'
+    penalize_time: bool         = True,
+    max_steps_in_episode: int   = 128,
+    discount_rate: float        = 0.995,
+    level_of_detail: int        = 1,
+    seed: int                   = 42,
+    debug: bool                 = False,
+):
+    """
+    Debug solution method for keys and chests.
+    """
+    util.print_config(locals())
+
+    print("initialising environment, generator, and solver...")
+    rng = jax.random.PRNGKey(seed=seed)
+    env = keys_and_chests.Env(
+        obs_level_of_detail=level_of_detail,
+        penalize_time=penalize_time,
+        max_steps_in_episode=max_steps_in_episode,
+    )
+    level_generator = keys_and_chests.LevelGenerator(
+        height=height,
+        width=width,
+        maze_generator=maze_generation.get_generator_class_from_name(
+            name=layout,
+        )(),
+        num_keys=1,
+        num_keys_max=5,
+        num_chests=5,
+        num_chests_max=5,
+    )
+
+    rng_level, rng = jax.random.split(rng)
+    level = level_generator.sample(rng_level)
+    obs, state = env.reset_to_level(level)
+    print(state)
+    print(util.img2str(obs.image))
+
+    # solve!?
+    print("new hopefully faster method:")
+    t0 = time.perf_counter()
+    value = keys_and_chests.optimal_value(
+        level=level,
+        discount_rate=discount_rate,
+        env=env,
+    )
+    t = time.perf_counter() - t0
+    print(f"{value} ({t:.3f}s)")
+
+    print("old slow method:")
+    t0 = time.perf_counter()
+    value = keys_and_chests.original_optimal_value(
+        level=level,
+        discount_rate=discount_rate,
+        env=env,
+    )
+    t = time.perf_counter() - t0
+    print(f"{value} ({t:.3f}s)")
+
 

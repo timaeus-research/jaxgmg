@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 
 from jaxtyping import Int, Array
-from collections.abc import Generator
 
 
 def num_combinations(n: int, r: int) -> int:
@@ -46,7 +45,7 @@ def permutations(n: int, r: int) -> Int[Array, "num_permutations(n,r) r"]:
 @functools.partial(jax.jit, static_argnames=["n"])
 def associations(n: int) -> Int[Array, "num_associations(n) 2*n"]:
     associations = enumerate_associations(n)
-    return jnp.array(list(associations))
+    return jnp.array(associations)
     
 
 def enumerate_associations(n: int) -> list[tuple[int, ...]]:
