@@ -116,8 +116,12 @@ def corner(
 def keys(
     height: int                 = 13,
     width: int                  = 13,
+    num_keys: int               = 1,
+    num_keys_max: int           = 5,
+    num_chests: int             = 5,
+    num_chests_max: int         = 5,
     layout: str                 = 'blocks',
-    solver: str                 = 'exact', # or 'heuristic'
+    solver: str                 = 'exact', # or 'heuristic' or 'original'
     penalize_time: bool         = True,
     max_steps_in_episode: int   = 128,
     discount_rate: float        = 0.995,
@@ -130,50 +134,61 @@ def keys(
     """
     util.print_config(locals())
 
-    print("initialising environment, generator, and solver...")
+    print("initialising environment, parser, and solver...")
     rng = jax.random.PRNGKey(seed=seed)
     env = keys_and_chests.Env(
         obs_level_of_detail=level_of_detail,
         penalize_time=penalize_time,
         max_steps_in_episode=max_steps_in_episode,
     )
-    level_generator = keys_and_chests.LevelGenerator(
-        height=height,
-        width=width,
-        maze_generator=maze_generation.get_generator_class_from_name(
-            name=layout,
-        )(),
-        num_keys=1,
-        num_keys_max=5,
-        num_chests=5,
-        num_chests_max=5,
-    )
+    
 
+    parser = keys_and_chests.LevelParser(
+        height=7,
+        width=7,
+        num_keys_max=3,
+        num_chests_max=3,
+        inventory_map=jax.numpy.arange(3),
+    )
+    
+    print("parsing...")
+    level = parser.parse("""
+        # # # # # # #
+        # k # @ . . #
+        # . # # # . #
+        # c . # k . #
+        # . . # . . #
+        # c . # c . #
+        # # # # # # #
+    """)
+    
+    print("level:")
     rng_level, rng = jax.random.split(rng)
-    level = level_generator.sample(rng_level)
     obs, state = env.reset_to_level(level)
-    print(state)
     print(util.img2str(obs.image))
 
     # solve!?
-    print("new hopefully faster method:")
     t0 = time.perf_counter()
-    value = keys_and_chests.optimal_value(
-        level=level,
-        discount_rate=discount_rate,
-        env=env,
-    )
+    if solver == "exact":
+        value = keys_and_chests.optimal_value(
+            level=level,
+            discount_rate=discount_rate,
+            env=env,
+        )
+    elif solver == "heuristic":
+        value = keys_and_chests.reachable_value(
+            level=level,
+            discount_rate=discount_rate,
+            env=env,
+        )
+    elif solver == "original":
+        value = keys_and_chests.original_optimal_value(
+            level=level,
+            discount_rate=discount_rate,
+            env=env,
+        )
+    else:
+        print(f"(unknown solver {solver})")
     t = time.perf_counter() - t0
     print(f"{value} ({t:.3f}s)")
-
-    print("old slow method:")
-    t0 = time.perf_counter()
-    value = keys_and_chests.original_optimal_value(
-        level=level,
-        discount_rate=discount_rate,
-        env=env,
-    )
-    t = time.perf_counter() - t0
-    print(f"{value} ({t:.3f}s)")
-
 

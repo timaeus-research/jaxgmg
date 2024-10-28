@@ -1045,7 +1045,53 @@ def optimal_value(
     vvveval = jax.vmap(vveval, in_axes=(0, None, None))  # : i N, j N, k 2N -> i j k
     values = vvveval(seqs_keys, seqs_chests, seqs_which) # -> i j k
 
+    ijk = jnp.argmax(values)
+    I_ = len(seqs_keys)
+    J_ = len(seqs_chests)
+    K_ = len(seqs_which)
+    k = ijk % (K_)
+    j = (ijk // (K_)) % J_
+    i = (ijk // (K_)) // J_
+    jax.debug.print("{}", ijk)
+    jax.debug.print("{} {}", i, seqs_keys[i])
+    jax.debug.print("{} {}", j, seqs_chests[j])
+    jax.debug.print("{} {}", k, seqs_which[k])
+
     return values.max()
+
+
+@functools.partial(jax.jit, static_argnames=('env',))
+def reachable_value(
+    level: Level,
+    discount_rate: float,
+    env: Env,
+) -> float:
+    # solve the maze
+    dists = maze_solving.maze_distances(level.wall_map)
+    # count reachable keys
+    keys_dists = dists[
+        level.initial_mouse_pos[0],
+        level.initial_mouse_pos[1],
+        level.keys_pos[:, 0],
+        level.keys_pos[:, 1],
+    ]
+    reachable_keys = ~jnp.isinf(keys_dists)
+    num_reachable_keys = jnp.sum(reachable_keys & ~level.hidden_keys)
+    # count reachable chests
+    chests_dists = dists[
+        level.initial_mouse_pos[0],
+        level.initial_mouse_pos[1],
+        level.chests_pos[:, 0],
+        level.chests_pos[:, 1],
+    ]
+    reachable_chests = ~jnp.isinf(chests_dists)
+    num_reachable_chests = jnp.sum(reachable_chests & ~level.hidden_chests)
+    # max available reward (TODO: this assumes no discounting)
+    reachable_value = jnp.minimum(
+        num_reachable_keys,
+        num_reachable_chests,
+    )
+    return reachable_value
 
 
 @functools.partial(jax.jit, static_argnames=('env',))
