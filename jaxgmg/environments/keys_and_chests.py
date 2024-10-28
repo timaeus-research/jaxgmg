@@ -678,7 +678,7 @@ class ToggleWallLevelMutator(base.LevelMutator):
         valid_map = valid_map.at[(0, h-1), :].set(False)
         valid_map = valid_map.at[:, (0, w-1)].set(False)
 
-        # exclude current keys,-chests, mouse spawn positions. should be fne to use that (-1) since that would be the last square which is anyway part of the border?
+        # exclude current keys,-chests, mouse spawn positions. 
         for i, (chest_pos, key_pos) in enumerate(zip(level.chests_pos, level.keys_pos)):
             valid_map = valid_map.at[chest_pos[0], chest_pos[1]].set(
                 jnp.where(level.hidden_chests[i], valid_map[chest_pos[0], chest_pos[1]], False)
@@ -742,9 +742,8 @@ class ScatterMouseLevelMutator(base.LevelMutator):
             new_initial_mouse_pos[1],
         ].set(False)
 
-        hit_chest = jnp.logical_and(
-            (new_initial_mouse_pos == level.chests_pos).all(axis=1),
-            ~level.hidden_chests
+        hit_chest = (
+            (new_initial_mouse_pos == level.chests_pos).all(axis=1)
         ).any()
 
         new_chests_pos = level.chests_pos
@@ -755,9 +754,8 @@ class ScatterMouseLevelMutator(base.LevelMutator):
         )
 
         # Check collisions only with active keys
-        hit_key = jnp.logical_and(
-            (new_initial_mouse_pos == level.keys_pos).all(axis=1),
-            ~level.hidden_keys
+        hit_key = (
+            (new_initial_mouse_pos == level.keys_pos).all(axis=1)
         ).any()
 
         new_keys_pos = level.keys_pos
