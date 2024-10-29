@@ -34,7 +34,7 @@ def solve_forever(
         obs, state = env.reset_to_level(level)
         
         print("initial state")
-        image = util.img2str(obs)
+        image = util.img2str(obs.image)
         lines = len(str(image).splitlines())
         print(
             image,
@@ -56,7 +56,7 @@ def solve_forever(
             print(
                 "" if debug else f"\x1b[{lines+4}A",
                 f"action: {a} ({'uldr'[a]})",
-                util.img2str(obs),
+                util.img2str(obs.image),
                 f"return estimate: {R:.2f} | reward: {r:.2f} | done: {done}",
                 "^C to quit",
                 sep="\n",
@@ -116,79 +116,59 @@ def corner(
 def keys(
     height: int                 = 13,
     width: int                  = 13,
+    layout: str                 = 'blocks',
     num_keys: int               = 1,
     num_keys_max: int           = 5,
     num_chests: int             = 5,
     num_chests_max: int         = 5,
-    layout: str                 = 'blocks',
-    solver: str                 = 'exact', # or 'heuristic' or 'original'
-    penalize_time: bool         = True,
+    penalize_time: bool         = False,
     max_steps_in_episode: int   = 128,
     discount_rate: float        = 0.995,
-    level_of_detail: int        = 1,
+    level_of_detail: int        = 8,
     seed: int                   = 42,
+    fps: float                  = 8,
     debug: bool                 = False,
 ):
     """
-    Debug solution method for keys and chests.
+    Demonstrate optimal solution for random Keys and Chests levels.
     """
     util.print_config(locals())
 
-    print("initialising environment, parser, and solver...")
+    print("initialising environment, generator, and solver...")
     rng = jax.random.PRNGKey(seed=seed)
     env = keys_and_chests.Env(
         obs_level_of_detail=level_of_detail,
         penalize_time=penalize_time,
         max_steps_in_episode=max_steps_in_episode,
     )
-    
-
-    parser = keys_and_chests.LevelParser(
-        height=7,
-        width=7,
-        num_keys_max=3,
-        num_chests_max=3,
-        inventory_map=jax.numpy.arange(3),
+    level_generator = keys_and_chests.LevelGenerator(
+        height=height,
+        width=width,
+        maze_generator=maze_generation.get_generator_class_from_name(
+            name=layout,
+        )(),
+        num_keys=num_keys,
+        num_keys_max=num_keys_max,
+        num_chests=num_chests,
+        num_chests_max=num_chests_max,
     )
-    
-    print("parsing...")
-    level = parser.parse("""
-        # # # # # # #
-        # k # @ . . #
-        # . # # # . #
-        # c . # k . #
-        # . . # . . #
-        # c . # c . #
-        # # # # # # #
-    """)
-    
-    print("level:")
-    rng_level, rng = jax.random.split(rng)
-    obs, state = env.reset_to_level(level)
-    print(util.img2str(obs.image))
+    level_solver = keys_and_chests.LevelSolver(
+        env=env,
+        discount_rate=discount_rate,
+    )
 
-    # solve!?
-    t0 = time.perf_counter()
-    if solver == "exact":
-        value = keys_and_chests.optimal_value(
-            level=level,
-            discount_rate=discount_rate,
-            env=env,
-        )
-    elif solver == "heuristic":
-        value = keys_and_chests.reachable_value(
-            level=level,
-            discount_rate=discount_rate,
-            env=env,
-        )
-    elif solver == "original":
-        value = keys_and_chests.original_optimal_value(
-            level=level,
-            discount_rate=discount_rate,
-            env=env,
-        )
-    else:
-        print(f"(unknown solver {solver})")
-    t = time.perf_counter() - t0
-    print(f"{value} ({t:.3f}s)")
+    solve_forever(
+        rng=rng,
+        env=env,
+        level_generator=level_generator,
+        level_solver=level_solver,
+        fps=fps,
+        debug=debug,
+    )
+    # value = keys_and_chests.optimal_value(
+    #     level=level,
+    #     discount_rate=discount_rate,
+    #     env=env,
+    # )
+
 
