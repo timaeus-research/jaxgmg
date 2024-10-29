@@ -552,14 +552,15 @@ def regret_oracle_actor(
         oracle_max_return = discount_rate ** goal_dist
     elif isinstance(level, keys_and_chests.Level):
         if not proxy_oracle:
-            oracle_max_return = keys_and_chests.optimal_value(
-                level=level,
-                discount_rate=discount_rate,
+            level_solver = keys_and_chests.LevelSolver(
                 env=keys_and_chests.Env( # HACK
                     penalize_time=False,
                     max_steps_in_episode=128,
                 ),
+                discount_rate=discount_rate,
             )
+            soln = level_solver.solve(level)
+            oracle_max_return = level_solver.level_value(soln, level)
         else:
             assert False
     else:
