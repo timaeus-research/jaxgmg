@@ -679,16 +679,22 @@ class ToggleWallLevelMutator(base.LevelMutator):
         valid_map = valid_map.at[:, (0, w-1)].set(False)
 
         # exclude current keys,-chests, mouse spawn positions. 
-        for i, (chest_pos, key_pos) in enumerate(zip(level.chests_pos, level.keys_pos)):
+        for i, chest_pos in enumerate(level.chests_pos):
             valid_map = valid_map.at[chest_pos[0], chest_pos[1]].set(
-                jnp.where(level.hidden_chests[i], valid_map[chest_pos[0], chest_pos[1]], False)
+                jnp.where(
+                    level.hidden_chests[i],
+                    valid_map[chest_pos[0], chest_pos[1]],
+                    False,
+                )
             )
-            
+        for i, key_pos in enumerate(level.keys_pos):
             valid_map = valid_map.at[key_pos[0], key_pos[1]].set(
-                jnp.where(level.hidden_keys[i], valid_map[key_pos[0], key_pos[1]], False)
+                jnp.where(
+                    level.hidden_keys[i],
+                    valid_map[key_pos[0], key_pos[1]],
+                    False,
+                )
             )
-            
-        
         valid_map = valid_map.at[
             level.initial_mouse_pos[0],
             level.initial_mouse_pos[1]
@@ -713,6 +719,7 @@ class ToggleWallLevelMutator(base.LevelMutator):
         ].set(~hit_wall)
 
         return level.replace(wall_map=new_wall_map)
+
 
 @struct.dataclass
 class ScatterMouseLevelMutator(base.LevelMutator):
@@ -745,7 +752,6 @@ class ScatterMouseLevelMutator(base.LevelMutator):
         hit_chest = (
             (new_initial_mouse_pos == level.chests_pos).all(axis=1)
         ).any()
-
         new_chests_pos = level.chests_pos
         new_initial_mouse_pos = jax.lax.select(
             hit_chest,
@@ -753,11 +759,9 @@ class ScatterMouseLevelMutator(base.LevelMutator):
             new_initial_mouse_pos
         )
 
-        # Check collisions only with active keys
         hit_key = (
             (new_initial_mouse_pos == level.keys_pos).all(axis=1)
         ).any()
-
         new_keys_pos = level.keys_pos
         new_initial_mouse_pos = jax.lax.select(
             hit_key,
@@ -765,7 +769,6 @@ class ScatterMouseLevelMutator(base.LevelMutator):
             new_initial_mouse_pos
         )
         
-
         return level.replace(
             wall_map=new_wall_map,
             initial_mouse_pos=new_initial_mouse_pos,
@@ -872,6 +875,7 @@ class ScatterKeyLevelMutator(base.LevelMutator):
 
         )
 
+
 @struct.dataclass
 class ScatterChestLevelMutator(base.LevelMutator):
 
@@ -971,6 +975,8 @@ class ScatterChestLevelMutator(base.LevelMutator):
             chests_pos = new_chests_pos,
 
         )
+
+
 # # # 
 # Level parsing
 
