@@ -32,7 +32,10 @@ def solve_forever(
         rng_level, rng = jax.random.split(rng)
         level = level_generator.sample(rng_level)
         obs, state = env.reset_to_level(level)
-        
+        print("solving level...") 
+        soln = level_solver.solve(level)
+        print(f"initial value: {level_solver.level_value(soln, level):.3f}")
+
         print("initial state")
         image = util.img2str(obs.image)
         lines = len(str(image).splitlines())
@@ -42,27 +45,29 @@ def solve_forever(
             "^C to quit",
             sep="\n",
         )
-    
-        soln = level_solver.solve(level)
 
         rng_steps, rng = jax.random.split(rng)
         done = False
+        R = 0.0
+        t = 0
         while not done:
             time.sleep(1/fps)
             rng_step, rng_steps = jax.random.split(rng_steps)
-            R = level_solver.state_value(soln, state)
+            V = level_solver.state_value(soln, state)
             a = level_solver.state_action(soln, state)
             obs, state, r, done, _ = env.step(rng_step, state, a)
+            t = t + 1
+            R = R + r * level_solver.discount_rate ** t
             print(
                 "" if debug else f"\x1b[{lines+4}A",
                 f"action: {a} ({'uldr'[a]})",
                 util.img2str(obs.image),
-                f"return estimate: {R:.2f} | reward: {r:.2f} | done: {done}",
+                f"reward: {r:.3f} | return: {R:.3f} | value: {V:.3f} | done: {done}",
                 "^C to quit",
                 sep="\n",
             )
         if not debug:
-            print(f"\x1b[{lines+5}A")
+            print(f"\x1b[{lines+7}A")
 
 
 def corner(

@@ -1028,10 +1028,14 @@ def optimal_value(
                 cumulative_distance=new_cumulative_distance,
                 cumulative_reward=carry.cumulative_reward + reward,
             )
-            return new_carry, None
+            return new_carry, reward
 
         # scan _step over seq_key_or_chest
-        final_carry, _out = jax.lax.scan(_step, _Carry(), seq_key_or_chest)
+        final_carry, _rewards = jax.lax.scan(
+            _step,
+            _Carry(),
+            seq_key_or_chest,
+        )
         return final_carry.cumulative_reward
 
     # it remains to enumerate visitation sequences that could plausibly be
@@ -1292,7 +1296,11 @@ class LevelSolver(base.LevelSolver):
             )
             
             # logic for key step:
-            skip_key = key_step & state.got_keys[next_key]
+            skip_key = (
+                key_step
+                & state.got_keys[next_key]
+                & ~state.level.hidden_keys[next_key]
+            )
             get_key = (
                 key_step
                 & ~skip_key
@@ -1300,11 +1308,15 @@ class LevelSolver(base.LevelSolver):
             )
 
             # logic for chest step:
-            skip_chest = state.got_chests[next_chest]
+            skip_chest = (
+                chest_step
+                & state.got_chests[next_chest]
+                & ~state.level.hidden_chests[next_chest]
+            )
             hit_chest = (
                 chest_step
-                & ~state.level.hidden_chests[next_chest]
                 & ~skip_chest
+                & ~state.level.hidden_chests[next_chest]
             )
             has_key = (simulation_state.num_keys_in_inv > 0)
             open_chest = has_key & hit_chest
@@ -1364,10 +1376,10 @@ class LevelSolver(base.LevelSolver):
                 cumulative_distance=new_cumulative_distance,
                 cumulative_reward=simulation_state.cumulative_reward + reward,
             )
-            return new_simulation_state, None
+            return new_simulation_state, new_simulation_state
 
         # scan this function over the steps of the plan
-        final_simulation_state, _out = jax.lax.scan(
+        final_simulation_state, trace = jax.lax.scan(
             step_simulation,
             initial_simulation_state,
             sequence_of_keys_or_chests,
