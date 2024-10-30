@@ -888,6 +888,595 @@ class LevelParser(base.LevelParser):
 
 
 # # # 
+# Level solving (full)
+
+
+@struct.dataclass
+class FullLevelSolution(base.LevelSolution):
+    level: Level
+    directional_distances: chex.Array
+
+
+@struct.dataclass
+class FullLevelSolver(base.LevelSolver):
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def solve(self, level: Level) -> FullLevelSolution:
+        # compute distance between mouse and cheese
+        dd = maze_solving.maze_directional_distances(level.wall_map)
+        return FullLevelSolution(
+            level=level,
+            directional_distances=dd,
+        )
+
+    
+    def _evaluate_visitation_sequence(
+        self,
+        dists: chex.Array,
+        state: EnvState,
+        sequence_of_keys: chex.Array,           # int[Combinations(K, N), N], index into dists
+        sequence_of_chests: chex.Array,         # int[Combinations(C, N), N], index into dists
+        sequence_of_keys_or_chests: chex.Array, # bool[Catalan(N), 2*N]
+    ) -> float:
+        """
+        Simulate a rollout from the current state and compute how much value
+        it creates.
+        
+        Inputs (let K = num keys, C = num chests, N = min(K, C)):
+
+        * dists: float[1+K+C, 1+K+C]
+            Distance matrix. The rows columns represent, in order, the mouse,
+            key1, ..., keyK, chest1, ..., chestC. The type is 'float' even
+            though most distances are integers because some pairs are
+            unreachable and for these the distance is stored as floating
+            point infinity.
+        * state: EnvState
+            The state from which the plan to be evaluated is to begin. Used
+            for checking which keys/chests have already been collected, for
+            example.
+            Note that the dists could have been computed from the state, but
+            are pre-computed for efficiency reasons. It is assumed that the
+            dists correspond to this state.
+        * sequence_of_keys: int[N]
+            A sequence of key indices, in the range 0, ..., K-1, for indexing
+            into state key arrays.
+        * sequence_of_chests: int[N]
+            A sequence of chest indices, in the range 0, ..., C-1, for
+            indexing into state chest arrays.
+        * sequence_of_keys_or_chests: bool[2*N]
+            A sequence of flags describing how to interleave the key sequence
+            and the chest sequence. A value of 'False' indicates to go to the
+            next key. A value of 'True' indicates to go to the next chest.
+        
+        The final three arguments represent a 'visitation sequence' or
+        'plan'. Given such a plan and a starting state we can simulate the
+        mouse's path through the environment and figure out how much
+        discounted reward it would get. This function does that.
+        """
+        K, _2 = state.level.keys_pos.shape
+        
+        @struct.dataclass
+        class SimulationState:
+            # mouse state
+            current_node: int           # index into D
+            num_keys_in_inv: int
+            # visitation sequence state
+            keys_visited: int           # index into sequence_of_keys
+            chests_visited: int         # index into sequence_of_chests
+            # evaluation state
+            cumulative_distance: float  # float to handle infinities
+            cumulative_reward: float
+        
+        # initialise simulation state based on current environment state
+        initial_simulation_state = SimulationState(
+            current_node=0,
+            num_keys_in_inv=jnp.sum(state.got_keys & ~state.used_keys),
+            keys_visited=0,
+            chests_visited=0,
+            cumulative_distance=0.0,
+            cumulative_reward=0.0,
+        )
+        
+        # simulate one step of the plan/visitation sequence
+        def step_simulation(simulation_state, chest_step):
+            key_step = ~chest_step
+
+            # where to next?
+            next_key = sequence_of_keys[simulation_state.keys_visited]
+            next_chest = sequence_of_chests[simulation_state.chests_visited]
+            next_node = jnp.where(
+                key_step,
+                1 + next_key,       # transform for indexing into dists
+                1 + K + next_chest, # "
+            )
+            
+            # logic for key step:
+            skip_key = (
+                key_step
+                & state.got_keys[next_key]
+                & ~state.level.hidden_keys[next_key]
+            )
+            get_key = (
+                key_step
+                & ~skip_key
+                & ~state.level.hidden_keys[next_key]
+            )
+
+            # logic for chest step:
+            skip_chest = (
+                chest_step
+                & state.got_chests[next_chest]
+                & ~state.level.hidden_chests[next_chest]
+            )
+            hit_chest = (
+                chest_step
+                & ~skip_chest
+                & ~state.level.hidden_chests[next_chest]
+            )
+            has_key = (simulation_state.num_keys_in_inv > 0)
+            open_chest = has_key & hit_chest
+                
+            # logic for inventory
+            new_num_keys_in_inv = (
+                simulation_state.num_keys_in_inv
+                + get_key       # increment if we picked up a key
+                - open_chest    # decrement if we unlocked a chest
+            )
+            
+            # how many maze steps?
+            distance = dists[
+                simulation_state.current_node,
+                next_node,
+            ]
+            new_cumulative_distance = jnp.where(
+                skip_key | skip_chest,
+                simulation_state.cumulative_distance,
+                simulation_state.cumulative_distance + distance,
+            )
+            next_node = jnp.where(
+                skip_key | skip_chest,
+                simulation_state.current_node,
+                next_node,
+            )
+
+            # compute reward delivered at this step
+            raw_reward = open_chest.astype(float)
+            # discount reward since it comes in the future
+            discount_factor = self.discount_rate ** new_cumulative_distance
+            discounted_reward = raw_reward * discount_factor
+            # modify reward based on environment configuration
+            virtual_time = state.steps + new_cumulative_distance
+            penalty_factor = jnp.where(
+                self.env.penalize_time,
+                # optional linearly decaying penalty factor
+                1.0 - .9 * virtual_time / self.env.max_steps_in_episode,
+                # or, no penalty
+                1.0,
+            )
+            truncation_factor = jnp.where(
+                virtual_time >= self.env.max_steps_in_episode,
+                # if the simulation has exceeded allowed time, zero reward
+                0.0,
+                # else, full reward
+                1.0,
+            )
+            reward = discounted_reward * penalty_factor * truncation_factor
+
+            # update the carry
+            new_simulation_state = SimulationState(
+                current_node=next_node,
+                num_keys_in_inv=new_num_keys_in_inv,
+                keys_visited=simulation_state.keys_visited + key_step,
+                chests_visited=simulation_state.chests_visited + chest_step,
+                cumulative_distance=new_cumulative_distance,
+                cumulative_reward=simulation_state.cumulative_reward + reward,
+            )
+            return new_simulation_state, new_simulation_state
+
+        # scan this function over the steps of the plan
+        final_simulation_state, trace = jax.lax.scan(
+            step_simulation,
+            initial_simulation_state,
+            sequence_of_keys_or_chests,
+        )
+        return final_simulation_state.cumulative_reward
+
+
+    def _plan(
+        self,
+        soln: FullLevelSolution,
+        state: EnvState,
+    ) -> tuple[
+        # value
+        float,
+        # visitation sequence / plan
+        tuple[
+            chex.Array,
+            chex.Array,
+            chex.Array,
+        ],
+    ]:
+        """
+        Enumerate all 'plausibly-optimal' sequences of key/chest collection,
+        evaluate each one, then return the optimal plan and its value.
+        """
+        K, _2 = state.level.keys_pos.shape
+        C, _2 = state.level.chests_pos.shape
+        N = min(K, C)
+
+        # compute the abstract distance graph: the distance between the mouse,
+        # each key, and each chest
+        pos = jnp.concatenate((
+            state.mouse_pos[jnp.newaxis],
+            state.level.keys_pos,
+            state.level.chests_pos,
+        ))
+        dists = soln.directional_distances[
+            pos[:,0],
+            pos[:,1],
+            pos[:,[0]],
+            pos[:,[1]],
+            4, # distance from here (rather than after moving in a direction)
+        ]
+
+        # enumerate visitation sequences that could plausibly be optimal
+        sequences_of_keys = combinatorix.permutations(K, N)
+        sequences_of_chests = combinatorix.permutations(C, N)
+        sequences_of_which = combinatorix.associations(N).astype(bool)
+        # (the cartesian product of these three sets of sequences gives the
+        # full set of visitation sequences)
+
+        # vmap the evaluation function over the cartesian triple product of
+        # the above arrays, i.e. over all combinations of one sequence of
+        # keys, one sequence of chests, and one interleaving sequence.
+        ev = functools.partial(
+            self._evaluate_visitation_sequence,
+            dists,
+            state,
+        )
+        v1 = jax.vmap(ev, in_axes=(None, None, 0)) # :   N,   N, Z 2N ->     Z
+        v2 = jax.vmap(v1, in_axes=(None, 0, None)) # :   N, Y N, Z 2N ->   Y Z
+        v3 = jax.vmap(v2, in_axes=(0, None, None)) # : X N, Y N, Z 2N -> X Y Z
+
+        # apply the vmapped function to get an array of values
+        values = v3(
+            sequences_of_keys,
+            sequences_of_chests,
+            sequences_of_which,
+        ) # -> float[X, Y, Z]
+        # multidimensional argmax (note: breaks ties by lowest index)
+        i, j, k = jnp.unravel_index(
+            jnp.argmax(values),
+            values.shape,
+        )
+        
+        value = values[i, j, k]
+        plan = (
+            sequences_of_keys[i],
+            sequences_of_chests[j],
+            sequences_of_which[k],
+        )
+        return value, plan
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def state_value(self, soln: FullLevelSolution, state: EnvState) -> float:
+        # find the value of the best plan from this state using the helper
+        value, _plan = self._plan(soln, state)
+        return value
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def state_action_values(
+        self,
+        soln: FullLevelSolution,
+        state: EnvState,
+    ) -> chex.Array: # float[4]
+        # TODO: I guess it requires to simulate each action and then evaluate
+        # the resulting states separately? this is not necessary for now...!
+        raise NotImplementedError("TODO")
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def state_action(self, soln: FullLevelSolution, state: EnvState) -> int:
+        """
+        Optimal action from a given state.
+
+        Parameters:
+
+        * soln : FullLevelSolution
+                The output of `solve` method for this level.
+        * state : EnvState
+                The state to compute the optimal action for.
+            
+        Return:
+
+        * action : int
+                An optimal action from the given state.
+                
+        Notes:
+
+        * If there are multiple equally optimal actions, this method will
+          systematically prefer one or another in a complex way depending on
+          the implementation. Currently, it finds the first optimal plan
+          based on the order the plans happen to be enumerated, and the first
+          optimal action for carrying out the first step of that plan
+          (according to the order up (0), left (1), down (2), or right (3)).
+        * As a special case of this, if there is no achievable value, the
+          best plan would be the first plan, which might involve moving the
+          mouse towards keys or chests that are unreachable, disabled or have
+          already been collected.
+        """
+        # find an optimal plan from this state using the helper
+        _value, plan = self._plan(soln, state)
+        sequence_of_keys, sequence_of_chests, sequence_of_keys_or_chests = plan
+
+        # identify the first not-yet-taken step of the plan
+        N, = sequence_of_keys.shape
+        skip_keys_mask = state.got_keys[sequence_of_keys]
+        skip_chests_mask = state.got_chests[sequence_of_chests]
+        skip_which_mask = (jnp.zeros(2*N, dtype=bool)
+            .at[jnp.where(sequence_of_keys_or_chests, size=N)]
+            .set(skip_chests_mask)
+            .at[jnp.where(~sequence_of_keys_or_chests, size=N)]
+            .set(skip_keys_mask)
+        )
+        next_key = jnp.argmin(skip_keys_mask) # id of first False (no skip)
+        next_chest = jnp.argmin(skip_chests_mask)
+        next_which = jnp.argmin(skip_which_mask)
+
+        # identify the target position to execute this step
+        target_pos = jnp.where(
+            sequence_of_keys_or_chests[next_which],
+            state.level.chests_pos[sequence_of_chests[next_chest]],
+            state.level.keys_pos[sequence_of_keys[next_key]],
+        )
+
+        # choose the action that steps the mouse towards that position
+        action = jnp.argmin(soln.directional_distances[
+            state.mouse_pos[0],
+            state.mouse_pos[1],
+            target_pos[0],
+            target_pos[1],
+            :4, # only consider up/left/down/right, not 'stay' dimension
+        ])
+        return action
+
+
+# # # 
+# Level solving (level only)
+
+
+@struct.dataclass
+class PartialLevelSolution(base.LevelSolution):
+    value: float # just cache the value
+
+
+@struct.dataclass
+class PartialLevelSolver(base.LevelSolver):
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def solve(self, level: Level) -> PartialLevelSolution:
+        return PartialLevelSolution(
+            value=self._plan(level),
+        )
+
+    
+    def _plan(
+        self,
+        level: Level,
+    ) -> float:
+        """
+        Enumerate all 'plausibly-optimal' sequences of key/chest collection,
+        evaluate each one, then return the optimal plan's value.
+        """
+        K, _2 = level.keys_pos.shape
+        C, _2 = level.chests_pos.shape
+        N = min(K, C)
+
+        # compute the abstract distance graph: the distance between the mouse,
+        # each key, and each chest
+        pos = jnp.concatenate((
+            level.initial_mouse_pos[jnp.newaxis],
+            level.keys_pos,
+            level.chests_pos,
+        ))
+        dists = maze_solving.maze_distances(level.wall_map)[
+            pos[:,0],
+            pos[:,1],
+            pos[:,[0]],
+            pos[:,[1]],
+        ]
+
+        # enumerate visitation sequences that could plausibly be optimal
+        sequences_of_keys = combinatorix.permutations(K, N)
+        sequences_of_chests = combinatorix.permutations(C, N)
+        sequences_of_which = combinatorix.associations(N).astype(bool)
+        # (the cartesian product of these three sets of sequences gives the
+        # full set of visitation sequences)
+
+        # vmap the evaluation function over the cartesian triple product of
+        # the above arrays, i.e. over all combinations of one sequence of
+        # keys, one sequence of chests, and one interleaving sequence.
+        ev = functools.partial(
+            self._evaluate_visitation_sequence,
+            dists,
+            level,
+        )
+        v1 = jax.vmap(ev, in_axes=(None, None, 0)) # :   N,   N, Z 2N ->     Z
+        v2 = jax.vmap(v1, in_axes=(None, 0, None)) # :   N, Y N, Z 2N ->   Y Z
+        v3 = jax.vmap(v2, in_axes=(0, None, None)) # : X N, Y N, Z 2N -> X Y Z
+
+        # apply the vmapped function to get an array of values
+        values = v3(
+            sequences_of_keys,
+            sequences_of_chests,
+            sequences_of_which,
+        ) # -> float[X, Y, Z]
+
+        # report the best value available
+        return values.max()
+
+
+    def _evaluate_visitation_sequence(
+        self,
+        dists: chex.Array,
+        level: Level,
+        sequence_of_keys: chex.Array,           # int[Combinations(K, N), N], index into dists
+        sequence_of_chests: chex.Array,         # int[Combinations(C, N), N], index into dists
+        sequence_of_keys_or_chests: chex.Array, # bool[Catalan(N), 2*N]
+    ) -> float:
+        """
+        Simulate a rollout from the initial state of the level and compute
+        how much value it creates.
+        
+        Inputs (let K = num keys, C = num chests, N = min(K, C)):
+
+        * dists: float[1+K+C, 1+K+C]
+            Distance matrix. The rows columns represent, in order, the mouse,
+            key1, ..., keyK, chest1, ..., chestC. The type is 'float' even
+            though most distances are integers because some pairs are
+            unreachable and for these the distance is stored as floating
+            point infinity.
+        * level: Level
+            The level for which the plan is to be constructed. Used for
+            checking which keys/chests are enabled, for example.
+            Note that the dists could have been computed from the level, but
+            are pre-computed for efficiency reasons. It is assumed that the
+            dists correspond to this level's wall map.
+        * sequence_of_keys: int[N]
+            A sequence of key indices, in the range 0, ..., K-1, for indexing
+            into state key arrays.
+        * sequence_of_chests: int[N]
+            A sequence of chest indices, in the range 0, ..., C-1, for
+            indexing into state chest arrays.
+        * sequence_of_keys_or_chests: bool[2*N]
+            A sequence of flags describing how to interleave the key sequence
+            and the chest sequence. A value of 'False' indicates to go to the
+            next key. A value of 'True' indicates to go to the next chest.
+        
+        The final three arguments represent a 'visitation sequence' or
+        'plan'. Given such a plan and a starting state we can simulate the
+        mouse's path through the environment and figure out how much
+        discounted reward it would get. This function does that.
+        """
+        K, _2 = level.keys_pos.shape
+        
+        @struct.dataclass
+        class SimulationState:
+            # mouse state
+            current_node: int           # index into D
+            num_keys_in_inv: int
+            # visitation sequence state
+            keys_visited: int           # index into sequence_of_keys
+            chests_visited: int         # index into sequence_of_chests
+            # evaluation state
+            cumulative_distance: float  # float to handle infinities
+            cumulative_reward: float
+        
+        # initialise simulation state based on current environment state
+        initial_simulation_state = SimulationState(
+            current_node=0,
+            num_keys_in_inv=0,
+            keys_visited=0,
+            chests_visited=0,
+            cumulative_distance=0.0,
+            cumulative_reward=0.0,
+        )
+        
+        # simulate one step of the plan/visitation sequence
+        def step_simulation(simulation_state, chest_step):
+            key_step = ~chest_step
+
+            # where to next?
+            next_key = sequence_of_keys[simulation_state.keys_visited]
+            next_chest = sequence_of_chests[simulation_state.chests_visited]
+            next_node = jnp.where(
+                key_step,
+                1 + next_key,       # transform for indexing into dists
+                1 + K + next_chest, # "
+            )
+            
+            # logic for key step:
+            get_key = (
+                key_step
+                & ~level.hidden_keys[next_key]
+            )
+
+            # logic for chest step:
+            hit_chest = (
+                chest_step
+                & ~level.hidden_chests[next_chest]
+            )
+            has_key = (simulation_state.num_keys_in_inv > 0)
+            open_chest = has_key & hit_chest
+                
+            # logic for inventory
+            new_num_keys_in_inv = (
+                simulation_state.num_keys_in_inv
+                + get_key       # increment if we picked up a key
+                - open_chest    # decrement if we unlocked a chest
+            )
+            
+            # how many maze steps?
+            distance = dists[
+                simulation_state.current_node,
+                next_node,
+            ]
+            new_cumulative_distance = (
+                simulation_state.cumulative_distance + distance
+            )
+
+            # compute reward delivered at this step
+            raw_reward = open_chest.astype(float)
+            # discount reward since it comes in the future
+            discount_factor = self.discount_rate ** new_cumulative_distance
+            discounted_reward = raw_reward * discount_factor
+            # modify reward based on environment configuration
+            penalty_factor = jnp.where(
+                self.env.penalize_time,
+                # optional linearly decaying penalty factor
+                1.0 - .9 * new_cumulative_distance / self.env.max_steps_in_episode,
+                # or, no penalty
+                1.0,
+            )
+            truncation_factor = jnp.where(
+                new_cumulative_distance >= self.env.max_steps_in_episode,
+                # if the simulation has exceeded allowed time, zero reward
+                0.0,
+                # else, full reward
+                1.0,
+            )
+            reward = discounted_reward * penalty_factor * truncation_factor
+
+            # update the carry
+            new_simulation_state = SimulationState(
+                current_node=next_node,
+                num_keys_in_inv=new_num_keys_in_inv,
+                keys_visited=simulation_state.keys_visited + key_step,
+                chests_visited=simulation_state.chests_visited + chest_step,
+                cumulative_distance=new_cumulative_distance,
+                cumulative_reward=simulation_state.cumulative_reward + reward,
+            )
+            return new_simulation_state, None
+
+        # scan this function over the steps of the plan
+        final_simulation_state, _ = jax.lax.scan(
+            step_simulation,
+            initial_simulation_state,
+            sequence_of_keys_or_chests,
+        )
+        return final_simulation_state.cumulative_reward
+
+
+    @functools.partial(jax.jit, static_argnames=('self',))
+    def level_value(self, soln: PartialLevelSolution, level: Level) -> float:
+        return soln.value
+
+
+# # # 
 # Level valuation
 
 
@@ -1189,363 +1778,6 @@ def original_optimal_value(
     _, values, _, _ = final_carry
     
     return values.max()
-
-
-# # # 
-# Level solving
-
-
-@struct.dataclass
-class LevelSolution(base.LevelSolution):
-    level: Level
-    directional_distances: chex.Array
-
-
-@struct.dataclass
-class LevelSolver(base.LevelSolver):
-
-
-    @functools.partial(jax.jit, static_argnames=('self',))
-    def solve(self, level: Level) -> LevelSolution:
-        # compute distance between mouse and cheese
-        dd = maze_solving.maze_directional_distances(level.wall_map)
-        return LevelSolution(
-            level=level,
-            directional_distances=dd,
-        )
-
-    
-    def _evaluate_visitation_sequence(
-        self,
-        dists: chex.Array,
-        state: EnvState,
-        sequence_of_keys: chex.Array,           # int[Combinations(K, N), N], index into dists
-        sequence_of_chests: chex.Array,         # int[Combinations(C, N), N], index into dists
-        sequence_of_keys_or_chests: chex.Array, # bool[Catalan(N), 2*N]
-    ) -> float:
-        """
-        Simulate a rollout from the current state and compute how much value
-        it creates.
-        
-        Inputs (let K = num keys, C = num chests, N = min(K, C)):
-
-        * dists: float[1+K+C, 1+K+C]
-            Distance matrix. The rows columns represent, in order, the mouse,
-            key1, ..., keyK, chest1, ..., chestC. The type is 'float' even
-            though most distances are integers because some pairs are
-            unreachable and for these the distance is stored as floating
-            point infinity.
-        * state: EnvState
-            The state from which the plan to be evaluated is to begin. Used
-            for checking which keys/chests have already been collected, for
-            example.
-            Note that the dists could have been computed from the state, but
-            are pre-computed for efficiency reasons. It is assumed that the
-            dists correspond to this state.
-        * sequence_of_keys: int[N]
-            A sequence of key indices, in the range 0, ..., K-1, for indexing
-            into state key arrays.
-        * sequence_of_chests: int[N]
-            A sequence of chest indices, in the range 0, ..., C-1, for
-            indexing into state chest arrays.
-        * sequence_of_keys_or_chests: bool[2*N]
-            A sequence of flags describing how to interleave the key sequence
-            and the chest sequence. A value of 'False' indicates to go to the
-            next key. A value of 'True' indicates to go to the next chest.
-        
-        The final three arguments represent a 'visitation sequence' or
-        'plan'. Given such a plan and a starting state we can simulate the
-        mouse's path through the environment and figure out how much
-        discounted reward it would get. This function does that.
-        """
-        K, _2 = state.level.keys_pos.shape
-        
-        @struct.dataclass
-        class SimulationState:
-            # mouse state
-            current_node: int           # index into D
-            num_keys_in_inv: int
-            # visitation sequence state
-            keys_visited: int           # index into sequence_of_keys
-            chests_visited: int         # index into sequence_of_chests
-            # evaluation state
-            cumulative_distance: float  # float to handle infinities
-            cumulative_reward: float
-        
-        # initialise simulation state based on current environment state
-        initial_simulation_state = SimulationState(
-            current_node=0,
-            num_keys_in_inv=jnp.sum(state.got_keys & ~state.used_keys),
-            keys_visited=0,
-            chests_visited=0,
-            cumulative_distance=0.0,
-            cumulative_reward=0.0,
-        )
-        
-        # simulate one step of the plan/visitation sequence
-        def step_simulation(simulation_state, chest_step):
-            key_step = ~chest_step
-
-            # where to next?
-            next_key = sequence_of_keys[simulation_state.keys_visited]
-            next_chest = sequence_of_chests[simulation_state.chests_visited]
-            next_node = jnp.where(
-                key_step,
-                1 + next_key,       # transform for indexing into dists
-                1 + K + next_chest, # "
-            )
-            
-            # logic for key step:
-            skip_key = (
-                key_step
-                & state.got_keys[next_key]
-                & ~state.level.hidden_keys[next_key]
-            )
-            get_key = (
-                key_step
-                & ~skip_key
-                & ~state.level.hidden_keys[next_key]
-            )
-
-            # logic for chest step:
-            skip_chest = (
-                chest_step
-                & state.got_chests[next_chest]
-                & ~state.level.hidden_chests[next_chest]
-            )
-            hit_chest = (
-                chest_step
-                & ~skip_chest
-                & ~state.level.hidden_chests[next_chest]
-            )
-            has_key = (simulation_state.num_keys_in_inv > 0)
-            open_chest = has_key & hit_chest
-                
-            # logic for inventory
-            new_num_keys_in_inv = (
-                simulation_state.num_keys_in_inv
-                + get_key       # increment if we picked up a key
-                - open_chest    # decrement if we unlocked a chest
-            )
-            
-            # how many maze steps?
-            distance = dists[
-                simulation_state.current_node,
-                next_node,
-            ]
-            new_cumulative_distance = jnp.where(
-                skip_key | skip_chest,
-                simulation_state.cumulative_distance,
-                simulation_state.cumulative_distance + distance,
-            )
-            next_node = jnp.where(
-                skip_key | skip_chest,
-                simulation_state.current_node,
-                next_node,
-            )
-
-            # compute reward delivered at this step
-            raw_reward = open_chest.astype(float)
-            # discount reward since it comes in the future
-            discount_factor = self.discount_rate ** new_cumulative_distance
-            discounted_reward = raw_reward * discount_factor
-            # modify reward based on environment configuration
-            virtual_time = state.steps + new_cumulative_distance
-            penalty_factor = jnp.where(
-                self.env.penalize_time,
-                # optional linearly decaying penalty factor
-                1.0 - .9 * virtual_time / self.env.max_steps_in_episode,
-                # or, no penalty
-                1.0,
-            )
-            truncation_factor = jnp.where(
-                virtual_time >= self.env.max_steps_in_episode,
-                # if the simulation has exceeded allowed time, zero reward
-                0.0,
-                # else, full reward
-                1.0,
-            )
-            reward = discounted_reward * penalty_factor * truncation_factor
-
-            # update the carry
-            new_simulation_state = SimulationState(
-                current_node=next_node,
-                num_keys_in_inv=new_num_keys_in_inv,
-                keys_visited=simulation_state.keys_visited + key_step,
-                chests_visited=simulation_state.chests_visited + chest_step,
-                cumulative_distance=new_cumulative_distance,
-                cumulative_reward=simulation_state.cumulative_reward + reward,
-            )
-            return new_simulation_state, new_simulation_state
-
-        # scan this function over the steps of the plan
-        final_simulation_state, trace = jax.lax.scan(
-            step_simulation,
-            initial_simulation_state,
-            sequence_of_keys_or_chests,
-        )
-        return final_simulation_state.cumulative_reward
-
-
-    def _plan(
-        self,
-        soln: LevelSolution,
-        state: EnvState,
-    ) -> tuple[
-        # value
-        float,
-        # visitation sequence / plan
-        tuple[
-            chex.Array,
-            chex.Array,
-            chex.Array,
-        ],
-    ]:
-        """
-        Enumerate all 'plausibly-optimal' sequences of key/chest collection,
-        evaluate each one, then return the optimal plan and its value.
-        """
-        K, _2 = state.level.keys_pos.shape
-        C, _2 = state.level.chests_pos.shape
-        N = min(K, C)
-
-        # compute the abstract distance graph: the distance between the mouse,
-        # each key, and each chest
-        pos = jnp.concatenate((
-            state.mouse_pos[jnp.newaxis],
-            state.level.keys_pos,
-            state.level.chests_pos,
-        ))
-        dists = soln.directional_distances[
-            pos[:,0],
-            pos[:,1],
-            pos[:,[0]],
-            pos[:,[1]],
-            4, # distance from here (rather than after moving in a direction)
-        ]
-
-        # enumerate visitation sequences that could plausibly be optimal
-        sequences_of_keys = combinatorix.permutations(K, N)
-        sequences_of_chests = combinatorix.permutations(C, N)
-        sequences_of_which = combinatorix.associations(N).astype(bool)
-        # (the cartesian product of these three sets of sequences gives the
-        # full set of visitation sequences)
-
-        # vmap the evaluation function over the cartesian triple product of
-        # the above arrays, i.e. over all combinations of one sequence of
-        # keys, one sequence of chests, and one interleaving sequence.
-        ev = functools.partial(
-            self._evaluate_visitation_sequence,
-            dists,
-            state,
-        )
-        v1 = jax.vmap(ev, in_axes=(None, None, 0)) # :   N,   N, Z 2N ->     Z
-        v2 = jax.vmap(v1, in_axes=(None, 0, None)) # :   N, Y N, Z 2N ->   Y Z
-        v3 = jax.vmap(v2, in_axes=(0, None, None)) # : X N, Y N, Z 2N -> X Y Z
-
-        # apply the vmapped function to get an array of values
-        values = v3(
-            sequences_of_keys,
-            sequences_of_chests,
-            sequences_of_which,
-        ) # -> float[X, Y, Z]
-        # multidimensional argmax (note: breaks ties by lowest index)
-        i, j, k = jnp.unravel_index(
-            jnp.argmax(values),
-            values.shape,
-        )
-        
-        value = values[i, j, k]
-        plan = (
-            sequences_of_keys[i],
-            sequences_of_chests[j],
-            sequences_of_which[k],
-        )
-        return value, plan
-
-
-    @functools.partial(jax.jit, static_argnames=('self',))
-    def state_value(self, soln: LevelSolution, state: EnvState) -> float:
-        # find the value of the best plan from this state using the helper
-        value, _plan = self._plan(soln, state)
-        return value
-
-
-    @functools.partial(jax.jit, static_argnames=('self',))
-    def state_action_values(
-        self,
-        soln: LevelSolution,
-        state: EnvState,
-    ) -> chex.Array: # float[4]
-        # TODO: I guess it requires to simulate each action and then evaluate
-        # the resulting states separately? this is not necessary for now...!
-        raise NotImplementedError("TODO")
-
-
-    @functools.partial(jax.jit, static_argnames=('self',))
-    def state_action(self, soln: LevelSolution, state: EnvState) -> int:
-        """
-        Optimal action from a given state.
-
-        Parameters:
-
-        * soln : LevelSolution
-                The output of `solve` method for this level.
-        * state : EnvState
-                The state to compute the optimal action for.
-            
-        Return:
-
-        * action : int
-                An optimal action from the given state.
-                
-        Notes:
-
-        * If there are multiple equally optimal actions, this method will
-          systematically prefer one or another in a complex way depending on
-          the implementation. Currently, it finds the first optimal plan
-          based on the order the plans happen to be enumerated, and the first
-          optimal action for carrying out the first step of that plan
-          (according to the order up (0), left (1), down (2), or right (3)).
-        * As a special case of this, if there is no achievable value, the
-          best plan would be the first plan, which might involve moving the
-          mouse towards keys or chests that are unreachable, disabled or have
-          already been collected.
-        """
-        # find an optimal plan from this state using the helper
-        _value, plan = self._plan(soln, state)
-        sequence_of_keys, sequence_of_chests, sequence_of_keys_or_chests = plan
-
-        # identify the first not-yet-taken step of the plan
-        N, = sequence_of_keys.shape
-        skip_keys_mask = state.got_keys[sequence_of_keys]
-        skip_chests_mask = state.got_chests[sequence_of_chests]
-        skip_which_mask = (jnp.zeros(2*N, dtype=bool)
-            .at[jnp.where(sequence_of_keys_or_chests, size=N)]
-            .set(skip_chests_mask)
-            .at[jnp.where(~sequence_of_keys_or_chests, size=N)]
-            .set(skip_keys_mask)
-        )
-        next_key = jnp.argmin(skip_keys_mask) # id of first False (no skip)
-        next_chest = jnp.argmin(skip_chests_mask)
-        next_which = jnp.argmin(skip_which_mask)
-
-        # identify the target position to execute this step
-        target_pos = jnp.where(
-            sequence_of_keys_or_chests[next_which],
-            state.level.chests_pos[sequence_of_chests[next_chest]],
-            state.level.keys_pos[sequence_of_keys[next_key]],
-        )
-
-        # choose the action that steps the mouse towards that position
-        action = jnp.argmin(soln.directional_distances[
-            state.mouse_pos[0],
-            state.mouse_pos[1],
-            target_pos[0],
-            target_pos[1],
-            :4, # only consider up/left/down/right, not 'stay' dimension
-        ])
-        return action
 
 
 # # # 

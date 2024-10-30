@@ -616,6 +616,9 @@ class LevelSolver:
     
     @functools.partial(jax.jit, static_argnames=('self',))
     def level_value(self, soln: LevelSolution, level: Level) -> float:
+        # TODO: this is wrong, should not take in a level as input, should
+        # take the level from the soln, a soln is specific to a level right?
+        # if a different level is passed in this will give the wrong output.
         state = self.env._reset(level)
         return self.state_value(soln, state)
 

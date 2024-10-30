@@ -23,10 +23,12 @@ def solve_forever(
     level_solver: base.LevelSolver,
     fps: float,
     debug: bool,
+    partial_level_solver: base.LevelSolver | None = None,
 ):
     """
     Helper function for solving with a given environment.
     """
+    p = partial_level_solver is not None
     while True:
         print("generating level...")
         rng_level, rng = jax.random.split(rng)
@@ -35,6 +37,9 @@ def solve_forever(
         print("solving level...") 
         soln = level_solver.solve(level)
         print(f"initial value: {level_solver.level_value(soln, level):.3f}")
+        if p:
+            partial_soln = partial_level_solver.solve(level)
+            print(f"initial value: {partial_level_solver.level_value(partial_soln, level):.3f} (according to partial solver)")
 
         print("initial state")
         image = util.img2str(obs.image)
@@ -67,7 +72,7 @@ def solve_forever(
                 sep="\n",
             )
         if not debug:
-            print(f"\x1b[{lines+7}A")
+            print(f"\x1b[{lines+7+p}A")
 
 
 def corner(
@@ -157,7 +162,11 @@ def keys(
         num_chests=num_chests,
         num_chests_max=num_chests_max,
     )
-    level_solver = keys_and_chests.LevelSolver(
+    level_solver = keys_and_chests.FullLevelSolver(
+        env=env,
+        discount_rate=discount_rate,
+    )
+    partial_level_solver = keys_and_chests.PartialLevelSolver(
         env=env,
         discount_rate=discount_rate,
     )
@@ -167,6 +176,7 @@ def keys(
         env=env,
         level_generator=level_generator,
         level_solver=level_solver,
+        partial_level_solver=partial_level_solver,
         fps=fps,
         debug=debug,
     )
