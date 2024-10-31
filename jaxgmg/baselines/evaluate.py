@@ -126,6 +126,8 @@ def run(
             levels_pos=levels_pos,
             grid_shape=grid_shape,
             env=env,
+            discount_rate=ppo_gamma,
+            num_steps=evals_num_env_steps,
             period=1,
         )
         eval_name = f"fixed-{level_name}"

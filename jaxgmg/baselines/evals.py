@@ -445,8 +445,8 @@ def generate_diamond_plot(shape, data, pos):
 @functools.partial(jax.jit, static_argnames=('shape',))
 def generate_heatmap_data(
     shape: tuple[int, int],
-    data: chex.Array, # float[n_positions]
-    pos: tuple[chex.Array, chex.Array], # (int[n_positions], int[n_positions])
+    data: Array, # float[n_positions]
+    pos: tuple[Array, Array], # (int[n_positions], int[n_positions])
 ):
     return { (i, j): r for r, i, j in zip(data, pos[0], pos[1]) }
 
