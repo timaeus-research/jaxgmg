@@ -184,7 +184,7 @@ def run(
     print("initialising the checkpoint loader...")
     max_to_keep = None
     checkpoint_manager = ocp.CheckpointManager(
-        directory=checkpoint_folder,
+        directory=os.path.abspath(checkpoint_folder),
         options=ocp.CheckpointManagerOptions(
             max_to_keep=max_to_keep,
             save_interval_steps=1,
@@ -195,7 +195,7 @@ def run(
         checkpoint_number,
         args=ocp.args.PyTreeRestore(net_init_params),
     )
-    print(net_params)
+    # print(net_params)
 
 
     # init train state
@@ -203,19 +203,20 @@ def run(
     train_state = TrainState.create(
         apply_fn=net.apply,
         params=net_params,
-        tx=None,
+        tx=optax.sgd(learning_rate=0),
     )
 
 
     #  evaluations
     print("doing the evaluations...")
+    metrics = collections.defaultdict(dict)
     rng_evals, rng = jax.random.split(rng)
     for eval_name, eval_obj in tqdm.tqdm(evals_dict.items()):
         rng_eval, rng_evals = jax.random.split(rng_evals)
         eval_start_time = time.perf_counter()
         metrics['eval-'+eval_name] = eval_obj.periodic_eval(
             rng=rng_eval,
-            step=t,
+            step=0,
             train_state=train_state,
             net_init_state=net_init_state,
         )
@@ -227,8 +228,8 @@ def run(
     metrics_str = util.filter_and_render_metrics(
         metrics,
         include_gifs=True,
-        include_imgs=log_imgs,
-        include_hists=log_hists,
+        include_imgs=True,
+        include_hists=True,
     )
     print(f'{"="*59}\n{metrics_str}\n{"="*59}')
         
