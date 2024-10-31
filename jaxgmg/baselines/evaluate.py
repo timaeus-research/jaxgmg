@@ -116,44 +116,59 @@ def run(
     print(f"configuring evals for {len(fixed_eval_levels)} fixed eval levels...")
     for level_name, level in fixed_eval_levels.items():
         print(f"  registering fixed level {level_name!r}")
-        eval_name = f"fixed-{level_name}"
-        solo_eval = evals.SingleLevelEval(
-            num_steps=evals_num_env_steps,
-            discount_rate=ppo_gamma,
-            level=level,
+        print("  splaying level for heatmap evals...")
+        levels, num_levels, levels_pos, grid_shape = (
+            heatmap_splayer_fn(level)
+        )
+        rollout_eval = evals.RolloutHeatmapDataEval(
+            levels=levels,
+            num_levels=num_levels,
+            levels_pos=levels_pos,
+            grid_shape=grid_shape,
             env=env,
             period=1,
         )
-        if heatmap_splayer_fn is not None:
-            print("  also splaying level for heatmap evals...")
-            levels, num_levels, levels_pos, grid_shape = (
-                heatmap_splayer_fn(level)
-            )
-            spawn_heatmap_eval = evals.ActorCriticHeatmapVisualisationEval(
-                levels=levels,
-                num_levels=num_levels,
-                levels_pos=levels_pos,
-                grid_shape=grid_shape,
-                env=env,
-                period=1,
-            )
-            rollout_heatmap_eval = evals.RolloutHeatmapVisualisationEval(
-                levels=levels,
-                num_levels=num_levels,
-                levels_pos=levels_pos,
-                grid_shape=grid_shape,
-                env=env,
-                discount_rate=ppo_gamma,
-                num_steps=evals_num_env_steps,
-                period=1,
-            )
-            evals_dict[eval_name] = evals.EvalList.create(
-                solo_eval,
-                spawn_heatmap_eval,
-                rollout_heatmap_eval,
-            )
-        else:
-            evals_dict[eval_name] = solo_eval
+        eval_name = f"fixed-{level_name}"
+        evals_dict[eval_name] = rollout_eval
+        # solo_eval = evals.SingleLevelEval(
+        #     num_steps=evals_num_env_steps,
+        #     discount_rate=ppo_gamma,
+        #     level=level,
+        #     env=env,
+        #     period=1,
+        # )
+        # if heatmap_splayer_fn is not None:
+        #     print("  also splaying level for heatmap evals...")
+        #     levels, num_levels, levels_pos, grid_shape = (
+        #         heatmap_splayer_fn(level)
+        #     )
+        #     spawn_heatmap_eval = evals.ActorCriticHeatmapVisualisationEval(
+        #         levels=levels,
+        #         num_levels=num_levels,
+        #         levels_pos=levels_pos,
+        #         grid_shape=grid_shape,
+        #         env=env,
+        #         period=1,
+        #     )
+        #     rollout_heatmap_eval = evals.RolloutHeatmapVisualisationEval(
+        #         levels=levels,
+        #         num_levels=num_levels,
+        #         levels_pos=levels_pos,
+        #         grid_shape=grid_shape,
+        #         env=env,
+        #         discount_rate=ppo_gamma,
+        #         num_steps=evals_num_env_steps,
+        #         period=1,
+        #     )
+        #     evals_dict[eval_name] = evals.EvalList.create(
+        #         solo_eval,
+        #         spawn_heatmap_eval,
+        #         rollout_heatmap_eval,
+        #     )
+        #     evals_dict[eval_name] = rollout_heatmap_eval
+        # else:
+        #     evals_dict[eval_name] = solo_eval
+
 
 
     print("configuring actor critic network...")

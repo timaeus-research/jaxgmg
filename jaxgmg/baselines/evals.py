@@ -374,6 +374,51 @@ class RolloutHeatmapVisualisationEval(Eval):
         }
     
 
+@struct.dataclass
+class RolloutHeatmapDataEval(Eval):
+    levels: Level
+    num_levels: int
+    levels_pos: tuple[Array, Array]
+    grid_shape: tuple[int, int]
+    num_steps: int
+    discount_rate: float
+    env: Env
+
+
+    def eval(
+        self,
+        rng: PRNGKey,
+        train_state: TrainState,
+        net_init_state: networks.ActorCriticState,
+    ) -> dict[str, Any]:
+
+        # model policy rollout returns -> heatmap
+        rollouts = experience.collect_rollouts(
+            rng=rng,
+            num_steps=self.num_steps,
+            net_apply=train_state.apply_fn,
+            net_params=train_state.params,
+            net_init_state=net_init_state,
+            env=self.env,
+            levels=self.levels,
+        )
+        returns = jax.vmap(
+            experience.compute_average_return,
+            in_axes=(0,0,None),
+        )(
+            rollouts.transitions.reward,
+            rollouts.transitions.done,
+            self.discount_rate,
+        )
+        rollout_heatmap_data = generate_heatmap_data(
+            shape=self.grid_shape,
+            data=returns,
+            pos=self.levels_pos,
+        )
+
+        return rollout_heatmap_data
+    
+
 # # # 
 # Plotting helper functions
 
@@ -395,5 +440,14 @@ def generate_diamond_plot(shape, data, pos):
             .at[2, 3, pos[0], pos[1], :].set(color_data[:,3,:]),
         'col row h w rgb -> (h col) (w row) rgb',
     )
+
+
+@functools.partial(jax.jit, static_argnames=('shape',))
+def generate_heatmap_data(
+    shape: tuple[int, int],
+    data: chex.Array, # float[n_positions]
+    pos: tuple[chex.Array, chex.Array], # (int[n_positions], int[n_positions])
+):
+    return { (i, j): r for r, i, j in zip(data, pos[0], pos[1]) }
 
 
