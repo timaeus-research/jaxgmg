@@ -410,13 +410,10 @@ class RolloutHeatmapDataEval(Eval):
             rollouts.transitions.done,
             self.discount_rate,
         )
-        rollout_heatmap_data = generate_heatmap_data(
-            shape=self.grid_shape,
-            data=returns,
-            pos=self.levels_pos,
-        )
 
-        return rollout_heatmap_data
+        return {
+            'returns': returns,
+        }
     
 
 # # # 
@@ -440,14 +437,5 @@ def generate_diamond_plot(shape, data, pos):
             .at[2, 3, pos[0], pos[1], :].set(color_data[:,3,:]),
         'col row h w rgb -> (h col) (w row) rgb',
     )
-
-
-@functools.partial(jax.jit, static_argnames=('shape',))
-def generate_heatmap_data(
-    shape: tuple[int, int],
-    data: Array, # float[n_positions]
-    pos: tuple[Array, Array], # (int[n_positions], int[n_positions])
-):
-    return { (i, j): r for r, i, j in zip(data, pos[0], pos[1]) }
 
 

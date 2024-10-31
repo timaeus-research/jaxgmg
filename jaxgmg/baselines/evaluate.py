@@ -226,28 +226,19 @@ def run(
 
     #  evaluations
     print("doing the evaluations...")
-    metrics = collections.defaultdict(dict)
     rng_evals, rng = jax.random.split(rng)
-    for eval_name, eval_obj in tqdm.tqdm(evals_dict.items()):
+    for eval_name, eval_obj in evals_dict.items():
         rng_eval, rng_evals = jax.random.split(rng_evals)
-        eval_start_time = time.perf_counter()
-        metrics['eval-'+eval_name] = eval_obj.periodic_eval(
+        results = eval_obj.periodic_eval(
             rng=rng_eval,
             step=0,
             train_state=train_state,
             net_init_state=net_init_state,
         )
-        eval_elapsed_time = time.perf_counter() - eval_start_time
-        metrics['perf'][f'eval-{eval_name}-duration'] = eval_elapsed_time
+        returns = results['returns']
+        print(f"{eval_name} = {{")
+        for r, i, j in zip(returns, eval_obj.levels_pos[0], eval_obj.levels_pos[1]):
+            print(f"  ({i}, {j}): {r},")
+        print(f"}}")
 
-        
-    print("printing outputs to console...")
-    metrics_str = util.filter_and_render_metrics(
-        metrics,
-        include_gifs=True,
-        include_imgs=True,
-        include_hists=True,
-    )
-    print(f'{"="*59}\n{metrics_str}\n{"="*59}')
-        
 
