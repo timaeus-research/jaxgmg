@@ -824,6 +824,7 @@ class ScatterChestLevelMutator(base.LevelMutator):
 
         )
 
+
 # # # 
 # Level parsing
 

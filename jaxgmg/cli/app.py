@@ -127,6 +127,7 @@ app.add_typer(make_typer_app(
         mutate.dish,
         mutate.minimaze,
         mutate.pile,
+        mutate.keys,
     ),
 ))
 
