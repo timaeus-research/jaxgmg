@@ -374,6 +374,48 @@ class RolloutHeatmapVisualisationEval(Eval):
         }
     
 
+@struct.dataclass
+class RolloutHeatmapDataEval(Eval):
+    levels: Level
+    num_levels: int
+    levels_pos: tuple[Array, Array]
+    grid_shape: tuple[int, int]
+    num_steps: int
+    discount_rate: float
+    env: Env
+
+
+    def eval(
+        self,
+        rng: PRNGKey,
+        train_state: TrainState,
+        net_init_state: networks.ActorCriticState,
+    ) -> dict[str, Any]:
+
+        # model policy rollout returns -> heatmap
+        rollouts = experience.collect_rollouts(
+            rng=rng,
+            num_steps=self.num_steps,
+            net_apply=train_state.apply_fn,
+            net_params=train_state.params,
+            net_init_state=net_init_state,
+            env=self.env,
+            levels=self.levels,
+        )
+        returns = jax.vmap(
+            experience.compute_average_return,
+            in_axes=(0,0,None),
+        )(
+            rollouts.transitions.reward,
+            rollouts.transitions.done,
+            self.discount_rate,
+        )
+
+        return {
+            'returns': returns,
+        }
+    
+
 # # # 
 # Plotting helper functions
 

@@ -11,11 +11,14 @@ from jaxgmg.environments import cheese_on_a_dish
 from jaxgmg.environments import cheese_on_a_pile
 from jaxgmg.environments import keys_and_chests
 from jaxgmg.environments import minigrid_maze
+from jaxgmg.environments import lava_land
+from jaxgmg.environments import follow_me
 from jaxgmg.baselines import train
 
 from jaxgmg.environments.base import Level
 from jaxgmg.environments.base import MixtureLevelGenerator
-from jaxgmg.environments.base import MixtureLevelMutator, IteratedLevelMutator
+from jaxgmg.environments.base import MixtureLevelMutator, IdentityLevelMutator
+from jaxgmg.environments.base import ChainLevelMutator, IteratedLevelMutator
 
 from jaxgmg import util
 
@@ -48,11 +51,14 @@ def corner(
     # for accel
     num_mutate_steps: int = 12,
     prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese: bool = True,
     # for proxy augmented methods
     train_proxy_critic: bool = False,
     plr_proxy_shaping: bool = False,
     proxy_name: str = "proxy_corner",
     plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = False,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -76,7 +82,7 @@ def corner(
     wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
     wandb_group: str = None,
     wandb_name: str = None,
-    log_gifs: bool = True,
+    log_gifs: bool = False,
     log_imgs: bool = True,
     log_hists: bool = False,
     num_cycles_per_log: int = 32,           #   32 * 32k = roughly  1M steps
@@ -153,33 +159,60 @@ def corner(
 
     print("configuring level mutator...")
     # if mutating cheese, mostly stay in the restricted region
-    biased_cheese_mutator = MixtureLevelMutator(
-        mutators=(
-            # teleport cheese to the corner or do not move the cheese
-            #cheese_in_the_corner.FixedCheeseLevelMutator(),
-            cheese_in_the_corner.CornerCheeseLevelMutator(
-                corner_size=env_corner_size,
-            ),
-
-            # teleport cheese to a random position
-            cheese_in_the_corner.ScatterCheeseLevelMutator(),
-        ),
-        mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
-    )
-    # overall, rotate between wall/mouse/cheese mutations uniformly
-    level_mutator = IteratedLevelMutator(
-        mutator=MixtureLevelMutator(
+    if mutate_cheese:
+        biased_cheese_mutator = MixtureLevelMutator(
             mutators=(
-                cheese_in_the_corner.ToggleWallLevelMutator(),
-                cheese_in_the_corner.ScatterMouseLevelMutator(
-                    transpose_with_cheese_on_collision=False,
+                # teleport cheese to the corner or do not move the cheese
+                cheese_in_the_corner.CornerCheeseLevelMutator(
+                    corner_size=env_corner_size,
                 ),
-                biased_cheese_mutator,
+                # teleport cheese to a random position
+                cheese_in_the_corner.ScatterCheeseLevelMutator(),
             ),
-            mixing_probs=(10/12,1/12,1/12),
-        ),
-        num_steps=num_mutate_steps,
-    )
+            mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
+        )
+    else:
+        # replace the cheese mutation with something else
+        biased_cheese_mutator = cheese_in_the_corner.ToggleWallLevelMutator()
+    # overall mutations
+    if chain_mutate:
+        level_mutator = ChainLevelMutator(mutators=(
+            # mutate walls (n-2 steps)
+            IteratedLevelMutator(
+                mutator=cheese_in_the_corner.ToggleWallLevelMutator(),
+                num_steps=num_mutate_steps - 2,
+            ),
+            # maybe scatter mouse (1 step) else another wall toggle
+            MixtureLevelMutator(
+                mutators=(
+                    cheese_in_the_corner.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                    ),
+                    cheese_in_the_corner.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # biased scatter cheese (1 step)
+            biased_cheese_mutator,
+        ))
+    else:
+        level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    cheese_in_the_corner.ToggleWallLevelMutator(),
+                    cheese_in_the_corner.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                    ),
+                    biased_cheese_mutator,
+                ),
+                mixing_probs=(
+                    (num_mutate_steps - 2) / num_mutate_steps,
+                    1 / num_mutate_steps,
+                    1 / num_mutate_steps,
+                ),
+            ),
+            num_steps=num_mutate_steps,
+        )
 
 
     print("configuring level solver...")
@@ -207,7 +240,7 @@ def corner(
     else:
         eval_level_generators = {
             "orig": orig_level_generator,
-            "shift": shift_level_generator,
+            #"shift": shift_level_generator,
             "tree": tree_level_generator,
         }
 
@@ -417,6 +450,12 @@ def corner(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -456,17 +495,20 @@ def dish(
     env_size: int = 13,
     env_layout: str = 'blocks',
     env_terminate_after_dish: bool = False,
-    max_cheese_radius: int = 0,
-    max_cheese_radius_shift: int = 10,
+    num_channels_cheese: int = 1,           # (bool only) num redundant cheese channels
+    num_channels_dish: int = 1,             # (bool only) num redundant dish channels
     obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
     img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
     env_penalize_time: bool = False,
+    # level generator config
+    cheese_on_dish: bool = True,
+    cheese_on_dish_shift: bool = False,
     # policy config
     net_cnn_type: str = "large",
     net_rnn_type: str = "ff",
     net_width: int = 256,
     # ued config
-    ued: str = "plr",                       # dr, dr-finite, plr, plr-parallel
+    ued: str = "plr",
     prob_shift: float = 0.0,
     # for domain randomisation
     num_train_levels: int = 2048,
@@ -479,15 +521,17 @@ def dish(
     plr_robust: bool = True,
     # for accel
     num_mutate_steps: int = 12,
-    prob_mutate_wall: float = 0.60,
-    prob_mutate_step: float = 0.95,
-    prob_mutate_cheese_or_dish: float = 0.0,
     prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese_on_dish: bool = True,
     # for proxy augmented methods
     train_proxy_critic: bool = False,
     plr_proxy_shaping: bool = False,
     proxy_name: str = "proxy_dish",
     plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = False,
+    eta_schedule: bool = False,
+    eta_schedule_time: float = 0.4,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -511,7 +555,7 @@ def dish(
     wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
     wandb_group: str = None,
     wandb_name: str = None,
-    log_gifs: bool = True,
+    log_gifs: bool = False,
     log_imgs: bool = True,
     log_hists: bool = False,
     num_cycles_per_log: int = 32,           #   32 * 32k = roughly  1M steps
@@ -536,6 +580,8 @@ def dish(
     print("configuring environment...")
     env = cheese_on_a_dish.Env(
         terminate_after_cheese_and_dish=env_terminate_after_dish,
+        num_channels_cheese=num_channels_cheese,
+        num_channels_dish=num_channels_dish,
         obs_level_of_detail=obs_level_of_detail,
         img_level_of_detail=img_level_of_detail,
         penalize_time=env_penalize_time,
@@ -550,13 +596,13 @@ def dish(
         height=env_size,
         width=env_size,
         maze_generator=maze_generator,
-        max_cheese_radius=max_cheese_radius,  
+        cheese_on_dish=cheese_on_dish,
     )
     shift_level_generator = cheese_on_a_dish.LevelGenerator(
         height=env_size,
         width=env_size,
         maze_generator=maze_generator,
-        max_cheese_radius=max_cheese_radius_shift,  
+        cheese_on_dish=cheese_on_dish_shift,  
     )
     if prob_shift > 0.0:
         print("  mixing level generators with {prob_shift=}...")
@@ -592,37 +638,72 @@ def dish(
 
 
     print("configuring level mutator...")
-    biased_cheese_on_dish_mutator = MixtureLevelMutator(
-        mutators=(
-            # teleport cheese and dish to a random position max_cheese_radius
-            cheese_on_a_dish.CheeseOnDishLevelMutator(
-                max_cheese_radius=max_cheese_radius,
-            ),
-            # teleport cheese and dish to a random different position, apart by max_cheese_radius
-            cheese_on_a_dish.CheeseOnDishLevelMutator(
-                max_cheese_radius=max_cheese_radius_shift,
-            ),
-        ),
-        mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
-    )
-    # overall, rotate between wall/mouse/cheese mutations uniformly
-    level_mutator = IteratedLevelMutator(
-        mutator=MixtureLevelMutator(
+    if mutate_cheese_on_dish:
+        biased_cheese_on_dish_mutator = MixtureLevelMutator(
             mutators=(
-                cheese_on_a_dish.ToggleWallLevelMutator(),
-                cheese_on_a_dish.ScatterMouseLevelMutator(
-                    transpose_with_cheese_on_collision=False,
-                    transpose_with_dish_on_collision=False,
+                # teleport cheese and dish to new same position
+                cheese_on_a_dish.CheeseOnDishLevelMutator(
+                    cheese_on_dish=cheese_on_dish,
                 ),
-                biased_cheese_on_dish_mutator,
+                # teleport cheese and dish to new different positions
+                cheese_on_a_dish.CheeseOnDishLevelMutator(
+                    cheese_on_dish=cheese_on_dish_shift,
+                ),
             ),
-            mixing_probs=(10/12,1/12,1/12),
-        ),
-        num_steps=num_mutate_steps,
+            mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
+        )
+    else:
+        # replace this mutation with something else
+        biased_cheese_on_dish_mutator = cheese_on_a_dish.ToggleWallLevelMutator()
+    # overall
+    if chain_mutate:
+        level_mutator = ChainLevelMutator(mutators=(
+            # mutate walls (n-2 steps)
+            IteratedLevelMutator(
+                mutator=cheese_on_a_dish.ToggleWallLevelMutator(),
+                num_steps=num_mutate_steps - 2,
+            ),
+            # maybe scatter mouse (1 step) else another wall toggle
+            MixtureLevelMutator(
+                mutators=(
+                    cheese_on_a_dish.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                        transpose_with_dish_on_collision=False,
+                    ),
+                    cheese_on_a_dish.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # biased reposition cheese/dish (1 step)
+            biased_cheese_on_dish_mutator,
+        ))
+    else:
+        # rotate between wall/mouse/cheese mutations uniformly
+        level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    cheese_on_a_dish.ToggleWallLevelMutator(),
+                    cheese_on_a_dish.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                        transpose_with_dish_on_collision=False,
+                    ),
+                    biased_cheese_on_dish_mutator,
+                ),
+                mixing_probs=(
+                    (num_mutate_steps - 2) / num_mutate_steps,
+                    1 / num_mutate_steps,
+                    1 / num_mutate_steps,
+                ),
+            ),
+            num_steps=num_mutate_steps,
+        )
+
+
+    print("configuring level solver...")
+    level_solver = cheese_on_a_dish.LevelSolver(
+        env=env,
+        discount_rate=ppo_gamma,
     )
-
-
-    print("TODO: implement level solver...")
 
 
     print("configuring level metrics...")
@@ -839,7 +920,7 @@ def dish(
         seed=seed,
         env=env,
         train_level_generator=train_level_generator,
-        level_solver=None,
+        level_solver=level_solver,
         level_mutator=level_mutator,
         level_metrics=level_metrics,
         eval_level_generators=eval_level_generators,
@@ -862,6 +943,12 @@ def dish(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=eta_schedule,
+        eta_schedule_time=eta_schedule_time,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -933,16 +1020,15 @@ def pile(
     plr_robust: bool = True,
     # for accel
     num_mutate_steps: int = 12,
-    prob_mutate_wall: float = 0.60,
-    prob_mutate_step: float = 0.95,
-    prob_mutate_cheese_or_pile: float = 0.0,
-    prob_mutate_objects_count_on_pile: float = 0.2,
     prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese_on_pile: bool = True,
     # for proxy augmented methods
     train_proxy_critic: bool = False,
     plr_proxy_shaping: bool = False,
     proxy_name: str = "proxy_pile",
     plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -966,7 +1052,7 @@ def pile(
     wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
     wandb_group: str = None,
     wandb_name: str = None,
-    log_gifs: bool = True,
+    log_gifs: bool = False,
     log_imgs: bool = True,
     log_hists: bool = False,
     num_cycles_per_log: int = 32,           #   32 * 32k = roughly  1M steps
@@ -1053,40 +1139,71 @@ def pile(
 
 
     print("configuring level mutator...")
-    biased_cheese_on_pile_mutator = MixtureLevelMutator(
-        mutators=(
-            # teleport cheese on pile
-            cheese_on_a_pile.CheeseonPileLevelMutator(
-                max_cheese_radius=max_cheese_radius,
-                split_elements=split_elements_shift, # split elements shift and train should always be the same -> Will fix that
-            ),
-            # teleport cheese and pile to a random different position, apart by max_cheese_radius
-            cheese_on_a_pile.CheeseonPileLevelMutator(
-                max_cheese_radius=max_cheese_radius_shift,
-                split_elements=split_elements_shift,
-            ),
-        ),
-        mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
-    )
-    # overall, rotate between wall/mouse/cheese mutations uniformly
-    level_mutator = IteratedLevelMutator(
-        mutator=MixtureLevelMutator(
+    if mutate_cheese_on_pile:
+        biased_cheese_on_pile_mutator = MixtureLevelMutator(
             mutators=(
-                cheese_on_a_pile.ToggleWallLevelMutator(),
-                cheese_on_a_pile.ScatterMouseLevelMutator(
-                    transpose_with_cheese_on_collision=False,
-                    transpose_with_pile_on_collision=False,
+                # teleport cheese on pile
+                cheese_on_a_pile.CheeseonPileLevelMutator(
+                    max_cheese_radius=max_cheese_radius,
+                    split_elements=split_elements_shift, # split elements shift and train should always be the same -> Will fix that
+                ),
+                # teleport cheese and pile to a random different position, apart by max_cheese_radius
+                cheese_on_a_pile.CheeseonPileLevelMutator(
+                    max_cheese_radius=max_cheese_radius_shift,
                     split_elements=split_elements_shift,
                 ),
-                biased_cheese_on_pile_mutator,
             ),
-            mixing_probs=(10/12,1/12,1/12),
-        ),
-        num_steps=num_mutate_steps,
+            mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
+        )
+    else:
+        # replace this mutation with something else
+        biased_cheese_on_pile_mutator = cheese_on_a_pile.ToggleWallLevelMutator()
+    # overall
+    if chain_mutate:
+        level_mutator = ChainLevelMutator(mutators=(
+            # mutate walls (n-2 steps)
+            IteratedLevelMutator(
+                mutator=cheese_on_a_pile.ToggleWallLevelMutator(),
+                num_steps=num_mutate_steps - 2,
+            ),
+            # maybe scatter mouse (1 step) else another wall toggle
+            MixtureLevelMutator(
+                mutators=(
+                    cheese_on_a_pile.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                        transpose_with_pile_on_collision=False,
+                        split_elements=split_elements_shift,
+                    ),
+                    cheese_on_a_pile.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # biased scatter cheese (1 step)
+            biased_cheese_on_pile_mutator,
+        ))
+    else:
+        level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    cheese_on_a_pile.ToggleWallLevelMutator(),
+                    cheese_on_a_pile.ScatterMouseLevelMutator(
+                        transpose_with_cheese_on_collision=False,
+                        transpose_with_pile_on_collision=False,
+                        split_elements=split_elements_shift,
+                    ),
+                    biased_cheese_on_pile_mutator,
+                ),
+                mixing_probs=(10/12,1/12,1/12),
+            ),
+            num_steps=num_mutate_steps,
+        )
+
+
+    print("configuring level solver...")
+    level_solver = cheese_on_a_pile.LevelSolver(
+        env=env,
+        discount_rate=ppo_gamma,
     )
-
-
-    print("TODO: implement level solver...") # this should be done but let's double check how to integrate it
 
 
     print("configuring level metrics...")
@@ -1304,7 +1421,7 @@ def pile(
         seed=seed,
         env=env,
         train_level_generator=train_level_generator,
-        level_solver=None,
+        level_solver=level_solver,
         level_mutator=level_mutator,
         level_metrics=level_metrics,
         eval_level_generators=eval_level_generators,
@@ -1327,6 +1444,9 @@ def pile(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -1363,33 +1483,45 @@ def pile(
 @util.wandb_run
 def keys(
     # environment config
-    env_size: int = 13,
+    env_size: int = 15,
     env_layout: str = 'blocks',
-    env_num_keys_min: int = 1,
-    env_num_keys_max: int = 3,
-    env_num_keys_min_shift: int = 9,
-    env_num_keys_max_shift: int = 12,
-    env_num_chests_min: int = 12,
-    env_num_chests_max: int = 24,
+    env_wall_prob: float = 0.25,
+    env_num_keys: int = 3,
+    env_num_keys_shift: int = 15,
+    env_num_chests: int = 15,
+    env_num_chests_shift: int = 5,
     obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
     img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
     env_penalize_time: bool = False,
-    # policy config
+    #  policy config
     net_cnn_type: str = "large",
     net_rnn_type: str = "ff",
     net_width: int = 256,
     # ued config
-    ued: str = "plr",                        # dr, dr-finite, plr, plr-parallel
+    ued: str = "plr",                       # dr, dr-finite, plr, plr-parallel
     prob_shift: float = 0.0,
-    # for domain randomisation
     num_train_levels: int = 2048,
     # for plr
     plr_buffer_size: int = 4096,
     plr_temperature: float = 0.1,
     plr_staleness_coeff: float = 0.1,
-    plr_prob_replay: float = 0.5,
+    plr_prob_replay: float = 0.5, #default 0.5
     plr_regret_estimator: str = "maxmc-actor",
-    plr_robust: bool = True,
+    plr_robust: bool = False,
+    debug_stop_gradient: bool = False,
+    debug_stop_gradient_after: float = 0.5,
+    debug_stop_gradient_oracle: bool = False,
+    # for accel
+    num_mutate_steps: int = 12,
+    prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese: bool = True,
+    # for proxy augmented methods
+    train_proxy_critic: bool = False,
+    plr_proxy_shaping: bool = False,
+    proxy_name: str = "keys",
+    plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -1400,9 +1532,6 @@ def keys(
     ppo_proxy_critic_coeff: float = 0.5,
     ppo_max_grad_norm: float = 0.5,
     ppo_lr_annealing: bool = False,
-    train_proxy_critic: bool = False,
-    plr_proxy_shaping: bool = False,
-    proxy_name: str = "keys",
     num_minibatches_per_epoch: int = 4,
     num_epochs_per_cycle: int = 5,
     # training dimensions
@@ -1412,7 +1541,7 @@ def keys(
     # logging and evals config
     console_log: bool = True,
     wandb_log: bool = True,
-    wandb_project: str = "test",
+    wandb_project: str = "keys_demo",
     wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
     wandb_group: str = None,
     wandb_name: str = None,
@@ -1447,25 +1576,33 @@ def keys(
 
 
     print("configuring level generators...")
-    maze_generator = maze_generation.get_generator_class_from_name(
+    maze_generator_class = maze_generation.get_generator_class_from_name(
         name=env_layout,
-    )()
+    )
+    if env_layout == "blocks":
+        maze_generator = maze_generator_class(
+            wall_prob=env_wall_prob,
+        )
+    else:
+        maze_generator = maze_generator_class()
+    env_num_keys_max = max(env_num_keys, env_num_keys_shift)
+    env_num_chests_max = max(env_num_chests, env_num_chests_shift)
     orig_level_generator = keys_and_chests.LevelGenerator(
         height=env_size,
         width=env_size,
         maze_generator=maze_generator,
-        num_keys_min=env_num_keys_min,
+        num_keys=env_num_keys,
         num_keys_max=env_num_keys_max,
-        num_chests_min=env_num_chests_min,
+        num_chests=env_num_chests,
         num_chests_max=env_num_chests_max,
     )
     shift_level_generator = keys_and_chests.LevelGenerator(
         height=env_size,
         width=env_size,
         maze_generator=maze_generator,
-        num_keys_min=env_num_keys_min_shift,
-        num_keys_max=env_num_keys_max_shift,
-        num_chests_min=env_num_chests_min,
+        num_keys=env_num_keys_shift,
+        num_keys_max=env_num_keys_max,
+        num_chests=env_num_chests_shift,
         num_chests_max=env_num_chests_max,
     )
     if prob_shift > 0.0:
@@ -1479,8 +1616,14 @@ def keys(
         train_level_generator = orig_level_generator
 
 
-    print("TODO: define level classifier")
-    classify_level_is_shift = None
+    print("configuring level classifier...")
+    def classify_level_is_shift(level: Level) -> bool:
+        num_visible_keys = jnp.sum(~level.hidden_keys)
+        num_visible_chests = jnp.sum(~level.hidden_chests)
+        return jnp.logical_and(
+            num_visible_keys == env_num_keys_shift,
+            num_visible_chests == env_num_chests_shift,
+        )
 
 
     print("configuring eval level generators...")
@@ -1496,11 +1639,30 @@ def keys(
             "shift": shift_level_generator,
         }
 
+    print("configuring level mutator...")
+
+    level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ToggleWallLevelMutator(),
+                    keys_and_chests.ScatterMouseLevelMutator(),
+                    keys_and_chests.ScatterChestLevelMutator(),
+                    keys_and_chests.ScatterKeyLevelMutator(),
+                ),
+                mixing_probs=(7/12, 1/12, 2/12, 2/12),
+            ),
+            num_steps=num_mutate_steps,
+        )
+
 
     print("TODO: implement level solver...")
 
 
-    print("TODO: implement level metrics...")
+    print("configuring level metrics...")
+    level_metrics = keys_and_chests.LevelMetrics(
+        env=env,
+        discount_rate=ppo_gamma,
+    )
 
 
     print("TODO: implement level splayers for heatmap evals...")
@@ -1514,8 +1676,8 @@ def keys(
         env=env,
         train_level_generator=train_level_generator,
         level_solver=None,
-        level_mutator=None,
-        level_metrics=None,
+        level_mutator=level_mutator,
+        level_metrics=level_metrics,
         eval_level_generators=eval_level_generators,
         fixed_eval_levels={},
         heatmap_splayer_fn=None,
@@ -1536,6 +1698,12 @@ def keys(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=debug_stop_gradient,
+        debug_stop_gradient_after=debug_stop_gradient_after,
+        debug_stop_gradient_oracle=debug_stop_gradient_oracle,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -1604,6 +1772,7 @@ def minimaze(
     plr_proxy_shaping: bool = False,
     proxy_name: str = "proxy_corner",
     plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -2023,6 +2192,12 @@ def minimaze(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -2082,6 +2257,7 @@ def memory_test(
     plr_proxy_shaping: bool = False,
     proxy_name: str = "",
     plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
     # PPO hyperparameters
     ppo_lr: float = 0.00005,                # learning rate
     ppo_gamma: float = 0.999,               # discount rate
@@ -2168,6 +2344,12 @@ def memory_test(
         plr_proxy_shaping=plr_proxy_shaping,
         proxy_name=proxy_name,
         plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
         ppo_lr=ppo_lr,
         ppo_gamma=ppo_gamma,
         ppo_clip_eps=ppo_clip_eps,
@@ -2201,3 +2383,431 @@ def memory_test(
     )
 
 
+
+
+@util.wandb_run
+def follow(
+    # environment config
+    env_size: int = 15,
+    env_layout: str = 'blocks',
+    num_beacons: int = 6,
+    trustworthy_leader: bool = True,
+    trustworthy_leader_shift: bool = False,
+    obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
+    img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
+    env_penalize_time: bool = False,
+    #  policy config
+    net_cnn_type: str = "large",
+    net_rnn_type: str = "ff",
+    net_width: int = 256,
+    # ued config
+    ued: str = "plr",                       # dr, dr-finite, plr, plr-parallel
+    prob_shift: float = 0.0,
+    num_train_levels: int = 2048,
+    # for plr
+    plr_buffer_size: int = 4096,
+    plr_temperature: float = 0.1,
+    plr_staleness_coeff: float = 0.1,
+    plr_prob_replay: float = 0.5, #default 0.5
+    plr_regret_estimator: str = "maxmc-actor",
+    plr_robust: bool = False,
+    # for accel
+    num_mutate_steps: int = 12,
+    prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese: bool = True,
+    # for proxy augmented methods
+    train_proxy_critic: bool = False,
+    plr_proxy_shaping: bool = False,
+    proxy_name: str = "leader_distance",
+    plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
+    # PPO hyperparameters
+    ppo_lr: float = 0.00005,                # learning rate
+    ppo_gamma: float = 0.999,               # discount rate
+    ppo_clip_eps: float = 0.1,
+    ppo_gae_lambda: float = 0.95,
+    ppo_entropy_coeff: float = 0.001,
+    ppo_critic_coeff: float = 0.5,
+    ppo_proxy_critic_coeff: float = 0.5,
+    ppo_max_grad_norm: float = 0.5,
+    ppo_lr_annealing: bool = False,
+    num_minibatches_per_epoch: int = 4,
+    num_epochs_per_cycle: int = 5,
+    # training dimensions
+    num_total_env_steps: int = 20_000_000,
+    num_env_steps_per_cycle: int = 128,
+    num_parallel_envs: int = 256,
+    # logging and evals config
+    console_log: bool = True,
+    wandb_log: bool = True,
+    wandb_project: str = "followme_demo",
+    wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
+    wandb_group: str = None,
+    wandb_name: str = None,
+    log_gifs: bool = True,
+    log_imgs: bool = True,
+    log_hists: bool = False,
+    num_cycles_per_log: int = 32,           #   32 * 32k = roughly  1M steps
+    num_cycles_per_eval: int = 32,          #   32 * 32k = roughly  1M steps
+    num_cycles_per_gifs: int = 1024,        # 1024 * 32k = roughly 32M steps
+    num_cycles_per_big_eval: int = 1024,    # 1024 * 32k = roughly 32M steps
+    evals_num_env_steps: int = 512,
+    evals_num_levels: int = 256,
+    gif_grid_width: int = 16,
+    # checkpointing
+    checkpointing: bool = True,             # keep checkpoints? (default: yes)
+    keep_all_checkpoints: bool = False,     # if so: keep all of them? (no)
+    max_num_checkpoints: int = 1,           # if not: keep only latest n (=1)
+    num_cycles_per_checkpoint: int = 512,
+    # other
+    seed: int = 42,
+):
+    config = locals()
+    util.print_config(config)
+
+
+    print("configuring environment...")
+    env = follow_me.Env(
+        obs_level_of_detail=obs_level_of_detail,
+        img_level_of_detail=img_level_of_detail,
+        penalize_time=env_penalize_time,
+    )
+
+
+    print("configuring level generators...")
+    maze_generator = maze_generation.get_generator_class_from_name(
+        name=env_layout,
+    )()
+    orig_level_generator = follow_me.LevelGenerator(
+        height=env_size,
+        width=env_size,
+        maze_generator=maze_generator,
+        num_beacons=num_beacons,
+        trustworthy_leader=trustworthy_leader,
+    )
+    shift_level_generator = follow_me.LevelGenerator(
+        height=env_size,
+        width=env_size,
+        maze_generator=maze_generator,
+        num_beacons=num_beacons,
+        trustworthy_leader=trustworthy_leader_shift,
+    )
+    if prob_shift > 0.0:
+        print("  mixing level generators with {prob_shift=}...")
+        train_level_generator = MixtureLevelGenerator(
+            level_generator1=orig_level_generator,
+            level_generator2=shift_level_generator,
+            prob_level1=1.0-prob_shift,
+        )
+    else:
+        train_level_generator = orig_level_generator
+
+
+    print("TODO: define level classifier")
+    classify_level_is_shift = None
+
+
+    print("configuring eval level generators...")
+    if prob_shift > 0.0:
+        eval_level_generators = {
+            "train": train_level_generator,
+            "orig": orig_level_generator,
+            "shift": shift_level_generator,
+        }
+    else:
+        eval_level_generators = {
+            "orig": orig_level_generator,
+            "shift": shift_level_generator,
+        }
+
+
+    print("TODO: implement level solver...")
+
+
+    print("TODO: implement level metrics...")
+
+
+    print("TODO: implement level splayers for heatmap evals...")
+
+
+    print("TODO: configure parser and fixed eval levels...")
+
+
+    train.run(
+        seed=seed,
+        env=env,
+        train_level_generator=train_level_generator,
+        level_solver=None,
+        level_mutator=None,
+        level_metrics=None,
+        eval_level_generators=eval_level_generators,
+        fixed_eval_levels={},
+        heatmap_splayer_fn=None,
+        classify_level_is_shift=classify_level_is_shift,
+        net_cnn_type=net_cnn_type,
+        net_rnn_type=net_rnn_type,
+        net_width=net_width,
+        ued=ued,
+        prob_shift=prob_shift,
+        num_train_levels=num_train_levels,
+        plr_buffer_size=plr_buffer_size,
+        plr_temperature=plr_temperature,
+        plr_staleness_coeff=plr_staleness_coeff,
+        plr_prob_replay=plr_prob_replay,
+        plr_regret_estimator=plr_regret_estimator,
+        plr_robust=plr_robust,
+        train_proxy_critic=train_proxy_critic,
+        plr_proxy_shaping=plr_proxy_shaping,
+        proxy_name=proxy_name,
+        plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
+        ppo_lr=ppo_lr,
+        ppo_gamma=ppo_gamma,
+        ppo_clip_eps=ppo_clip_eps,
+        ppo_gae_lambda=ppo_gae_lambda,
+        ppo_entropy_coeff=ppo_entropy_coeff,
+        ppo_critic_coeff=ppo_critic_coeff,
+        ppo_proxy_critic_coeff=ppo_proxy_critic_coeff,
+        ppo_max_grad_norm=ppo_max_grad_norm,
+        ppo_lr_annealing=ppo_lr_annealing,
+        num_minibatches_per_epoch=num_minibatches_per_epoch,
+        num_epochs_per_cycle=num_epochs_per_cycle,
+        num_total_env_steps=num_total_env_steps,
+        num_env_steps_per_cycle=num_env_steps_per_cycle,
+        num_parallel_envs=num_parallel_envs,
+        console_log=console_log,
+        wandb_log=wandb_log,
+        log_gifs=log_gifs,
+        log_imgs=log_imgs,
+        log_hists=log_hists,
+        num_cycles_per_log=num_cycles_per_log,
+        num_cycles_per_eval=num_cycles_per_eval,
+        num_cycles_per_gifs=num_cycles_per_gifs,
+        num_cycles_per_big_eval=num_cycles_per_big_eval,
+        evals_num_env_steps=evals_num_env_steps,
+        evals_num_levels=evals_num_levels,
+        gif_grid_width=gif_grid_width,
+        checkpointing=checkpointing,
+        keep_all_checkpoints=keep_all_checkpoints,
+        max_num_checkpoints=max_num_checkpoints,
+        num_cycles_per_checkpoint=num_cycles_per_checkpoint,
+    )
+
+
+@util.wandb_run
+def lava(
+    # environment config
+    env_size: int = 15,
+    env_layout: str = 'blocks',
+    num_beacons: int = 6,
+    lava_threshold: float = -1.0,
+    lava_treshold_shift: float = -0.25,
+    obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
+    img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
+    env_penalize_time: bool = False,
+    #  policy config
+    net_cnn_type: str = "large",
+    net_rnn_type: str = "ff",
+    net_width: int = 256,
+    # ued config
+    ued: str = "plr",                       # dr, dr-finite, plr, plr-parallel
+    prob_shift: float = 0.0,
+    num_train_levels: int = 2048,
+    # for plr
+    plr_buffer_size: int = 4096,
+    plr_temperature: float = 0.1,
+    plr_staleness_coeff: float = 0.1,
+    plr_prob_replay: float = 0.5, #default 0.5
+    plr_regret_estimator: str = "maxmc-actor",
+    plr_robust: bool = False,
+    # for accel
+    num_mutate_steps: int = 12,
+    prob_mutate_shift: float = 0.0,
+    chain_mutate: bool = True,
+    mutate_cheese: bool = True,
+    # for proxy augmented methods
+    train_proxy_critic: bool = False,
+    plr_proxy_shaping: bool = False,
+    proxy_name: str = "lava",
+    plr_proxy_shaping_coeff: float = 0.5,
+    clipping: bool = True,
+    # PPO hyperparameters
+    ppo_lr: float = 0.00005,                # learning rate
+    ppo_gamma: float = 0.999,               # discount rate
+    ppo_clip_eps: float = 0.1,
+    ppo_gae_lambda: float = 0.95,
+    ppo_entropy_coeff: float = 0.001,
+    ppo_critic_coeff: float = 0.5,
+    ppo_proxy_critic_coeff: float = 0.5,
+    ppo_max_grad_norm: float = 0.5,
+    ppo_lr_annealing: bool = False,
+    num_minibatches_per_epoch: int = 4,
+    num_epochs_per_cycle: int = 5,
+    # training dimensions
+    num_total_env_steps: int = 20_000_000,
+    num_env_steps_per_cycle: int = 128,
+    num_parallel_envs: int = 256,
+    # logging and evals config
+    console_log: bool = True,
+    wandb_log: bool = True,
+    wandb_project: str = "lavaland_demo",
+    wandb_entity: str = None,               # e.g. 'krueger-lab-cambridge'
+    wandb_group: str = None,
+    wandb_name: str = None,
+    log_gifs: bool = True,
+    log_imgs: bool = True,
+    log_hists: bool = False,
+    num_cycles_per_log: int = 32,           #   32 * 32k = roughly  1M steps
+    num_cycles_per_eval: int = 32,          #   32 * 32k = roughly  1M steps
+    num_cycles_per_gifs: int = 1024,        # 1024 * 32k = roughly 32M steps
+    num_cycles_per_big_eval: int = 1024,    # 1024 * 32k = roughly 32M steps
+    evals_num_env_steps: int = 512,
+    evals_num_levels: int = 256,
+    gif_grid_width: int = 16,
+    # checkpointing
+    checkpointing: bool = True,             # keep checkpoints? (default: yes)
+    keep_all_checkpoints: bool = False,     # if so: keep all of them? (no)
+    max_num_checkpoints: int = 1,           # if not: keep only latest n (=1)
+    num_cycles_per_checkpoint: int = 512,
+    # other
+    seed: int = 42,
+):
+    config = locals()
+    util.print_config(config)
+
+
+    print("configuring environment...")
+    env = lava_land.Env(
+        obs_level_of_detail=obs_level_of_detail,
+        img_level_of_detail=img_level_of_detail,
+        penalize_time=env_penalize_time,
+    )
+
+
+    print("configuring level generators...")
+    maze_generator = maze_generation.get_generator_class_from_name(
+        name=env_layout,
+    )()
+    orig_level_generator = lava_land.LevelGenerator(
+        height=env_size,
+        width=env_size,
+        maze_generator=maze_generator,
+        lava_threshold=lava_threshold,
+    )
+    shift_level_generator = lava_land.LevelGenerator(
+        height=env_size,
+        width=env_size,
+        maze_generator=maze_generator,
+        lava_threshold=lava_treshold_shift,
+    )
+    if prob_shift > 0.0:
+        print("  mixing level generators with {prob_shift=}...")
+        train_level_generator = MixtureLevelGenerator(
+            level_generator1=orig_level_generator,
+            level_generator2=shift_level_generator,
+            prob_level1=1.0-prob_shift,
+        )
+    else:
+        train_level_generator = orig_level_generator
+
+
+    print("TODO: define level classifier")
+    classify_level_is_shift = None
+
+
+    print("configuring eval level generators...")
+    if prob_shift > 0.0:
+        eval_level_generators = {
+            "train": train_level_generator,
+            "orig": orig_level_generator,
+            "shift": shift_level_generator,
+        }
+    else:
+        eval_level_generators = {
+            "orig": orig_level_generator,
+            "shift": shift_level_generator,
+        }
+
+
+    print("TODO: implement level solver...")
+
+
+    print("TODO: implement level metrics...")
+
+
+    print("TODO: implement level splayers for heatmap evals...")
+
+
+    print("TODO: configure parser and fixed eval levels...")
+
+
+    train.run(
+        seed=seed,
+        env=env,
+        train_level_generator=train_level_generator,
+        level_solver=None,
+        level_mutator=None,
+        level_metrics=None,
+        eval_level_generators=eval_level_generators,
+        fixed_eval_levels={},
+        heatmap_splayer_fn=None,
+        classify_level_is_shift=classify_level_is_shift,
+        net_cnn_type=net_cnn_type,
+        net_rnn_type=net_rnn_type,
+        net_width=net_width,
+        ued=ued,
+        prob_shift=prob_shift,
+        num_train_levels=num_train_levels,
+        plr_buffer_size=plr_buffer_size,
+        plr_temperature=plr_temperature,
+        plr_staleness_coeff=plr_staleness_coeff,
+        plr_prob_replay=plr_prob_replay,
+        plr_regret_estimator=plr_regret_estimator,
+        plr_robust=plr_robust,
+        train_proxy_critic=train_proxy_critic,
+        plr_proxy_shaping=plr_proxy_shaping,
+        proxy_name=proxy_name,
+        plr_proxy_shaping_coeff=plr_proxy_shaping_coeff,
+        clipping=clipping,
+        eta_schedule=False,
+        eta_schedule_time=0.0,
+        debug_stop_gradient=False,
+        debug_stop_gradient_after=0.5,
+        debug_stop_gradient_oracle=False,
+        ppo_lr=ppo_lr,
+        ppo_gamma=ppo_gamma,
+        ppo_clip_eps=ppo_clip_eps,
+        ppo_gae_lambda=ppo_gae_lambda,
+        ppo_entropy_coeff=ppo_entropy_coeff,
+        ppo_critic_coeff=ppo_critic_coeff,
+        ppo_proxy_critic_coeff=ppo_proxy_critic_coeff,
+        ppo_max_grad_norm=ppo_max_grad_norm,
+        ppo_lr_annealing=ppo_lr_annealing,
+        num_minibatches_per_epoch=num_minibatches_per_epoch,
+        num_epochs_per_cycle=num_epochs_per_cycle,
+        num_total_env_steps=num_total_env_steps,
+        num_env_steps_per_cycle=num_env_steps_per_cycle,
+        num_parallel_envs=num_parallel_envs,
+        console_log=console_log,
+        wandb_log=wandb_log,
+        log_gifs=log_gifs,
+        log_imgs=log_imgs,
+        log_hists=log_hists,
+        num_cycles_per_log=num_cycles_per_log,
+        num_cycles_per_eval=num_cycles_per_eval,
+        num_cycles_per_gifs=num_cycles_per_gifs,
+        num_cycles_per_big_eval=num_cycles_per_big_eval,
+        evals_num_env_steps=evals_num_env_steps,
+        evals_num_levels=evals_num_levels,
+        gif_grid_width=gif_grid_width,
+        checkpointing=checkpointing,
+        keep_all_checkpoints=keep_all_checkpoints,
+        max_num_checkpoints=max_num_checkpoints,
+        num_cycles_per_checkpoint=num_cycles_per_checkpoint,
+    )

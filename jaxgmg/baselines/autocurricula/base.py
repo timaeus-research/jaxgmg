@@ -88,6 +88,8 @@ class CurriculumGenerator:
         rollouts: Rollout,              # Rollout[num_levels] (num_steps)
         advantages: Array,              # float[num_levels, num_steps]
         proxy_advantages: Array | None, # float[num_levels, num_steps]
+        step: int, # for eta schedule
+        scoring_method_override: str | None, # IGNORED
     ) -> GeneratorState:
         return state
 

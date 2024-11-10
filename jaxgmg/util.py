@@ -93,7 +93,7 @@ def print_img(im, colormap=None):
     Render a small image to stdout using unicode half-block characters to
     represent pairs of pixels.
     """
-    print(img2str, colormap=colormap)
+    print(img2str(im, colormap=colormap))
 
 
 def filter_and_render_metrics(

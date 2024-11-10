@@ -29,6 +29,7 @@ from jaxgmg.cli import solve
 from jaxgmg.cli import speedtest
 from jaxgmg.cli import splay
 from jaxgmg.cli import train
+from jaxgmg.cli import eval
 
 
 # # #
@@ -126,6 +127,7 @@ app.add_typer(make_typer_app(
         mutate.dish,
         mutate.minimaze,
         mutate.pile,
+        mutate.keys,
     ),
 ))
 
@@ -170,7 +172,7 @@ app.add_typer(make_typer_app(
         solve.corner,
         # solve.dish, # not yet implemented
         # solve.follow, # not yet implemented
-        # solve.keys, # not yet implemented
+        solve.keys,
         # solve.lava, # not yet implemented
         # solve.monsters, # not yet implemented
     ),
@@ -218,13 +220,23 @@ app.add_typer(make_typer_app(
         train.corner,
         train.dish,
         train.pile,
-        # train.follow,
+        train.follow,
         train.keys,
-        # train.lava,
+        train.lava,
         # train.monsters,
         train.minimaze,
         train.memory_test,
         #train.scatter,
+    ),
+))
+
+
+# evaluation of checkpoints
+app.add_typer(make_typer_app(
+    name='eval',
+    help=eval.__doc__,
+    subcommands=(
+        eval.corner,
     ),
 ))
 

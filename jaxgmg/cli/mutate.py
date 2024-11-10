@@ -14,6 +14,7 @@ from jaxgmg.environments import base
 from jaxgmg.environments import cheese_in_the_corner
 from jaxgmg.environments import cheese_on_a_dish
 from jaxgmg.environments import cheese_on_a_pile
+from jaxgmg.environments import keys_and_chests
 from jaxgmg.environments import minigrid_maze
 from jaxgmg.environments.base import MixtureLevelMutator, IteratedLevelMutator
 from jaxgmg import util
@@ -343,3 +344,62 @@ def minimaze(
     )
     
 
+def keys(
+    height: int                 = 9,
+    width: int                  = 9,
+    layout: str                 = 'tree',
+    env_num_keys: int = 3,
+    env_num_keys_shift: int = 6,
+    env_num_chests: int = 6,
+    env_num_chests_shift: int = 3,
+    level_of_detail: int        = 8,
+    num_mutate_steps: int       = 1,
+    prob_mutate_shift: float    = 0.0,
+    transpose: bool             = False,
+    fps: float                  = 12.0,
+    debug: bool                 = False,
+    seed: int                   = 42,
+):
+    """
+    Iterative Cheese in the Corner mutator demo.
+    """
+    if level_of_detail not in {1,3,4,8}:
+        raise ValueError(f"invalid level of detail {level_of_detail}")
+    util.print_config(locals())
+
+    env_num_keys_max = max(env_num_keys, env_num_keys_shift)
+    env_num_chests_max = max(env_num_chests, env_num_chests_shift)
+    rng = jax.random.PRNGKey(seed=seed)
+    env = keys_and_chests.Env(img_level_of_detail=level_of_detail)
+    level_generator = keys_and_chests.LevelGenerator(
+        height=height,
+        width=width,
+        maze_generator=maze_generation.get_generator_class_from_name(
+            name=layout
+        )(),
+        num_keys=env_num_keys_shift,
+        num_keys_max=env_num_keys_max,
+        num_chests=env_num_chests_shift,
+        num_chests_max=env_num_chests_max,
+    )
+    # if mutating cheese, mostly stay in the restricted region
+    level_mutator = IteratedLevelMutator(
+            mutator=MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ToggleWallLevelMutator(),
+                    keys_and_chests.ScatterMouseLevelMutator(),
+                    keys_and_chests.ScatterChestLevelMutator(),
+                    keys_and_chests.ScatterKeyLevelMutator(),
+                ),
+                mixing_probs=(7/12, 1/12, 2/12, 2/12),
+            ),
+            num_steps=num_mutate_steps,
+        )
+    mutate_forever(
+        rng=rng,
+        env=env,
+        level_generator=level_generator,
+        level_mutator=level_mutator,
+        fps=fps,
+        debug=debug,
+    )

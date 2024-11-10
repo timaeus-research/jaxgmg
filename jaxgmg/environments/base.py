@@ -392,7 +392,6 @@ class MixtureLevelGenerator(LevelGenerator):
     level_generator2: LevelGenerator
     prob_level1: float
 
-
     def sample(
         self,
         rng: chex.PRNGKey,
@@ -406,9 +405,13 @@ class MixtureLevelGenerator(LevelGenerator):
         level1 = self.level_generator1.sample(rng1)
         level2 = self.level_generator2.sample(rng2)
 
-        # choose the chosen level
+        # choose the chosen level with padding
         chosen_level = jax.tree.map(
-            lambda leaf1, leaf2: jax.lax.select(which, leaf1, leaf2),
+            lambda leaf1, leaf2: jax.lax.select(
+                which,
+                leaf1,
+                leaf2,
+            ),
             level1,
             level2
         )
@@ -449,6 +452,15 @@ class LevelMutator:
 
 # # # 
 # Level mutator combinators
+
+
+@struct.dataclass
+class IdentityLevelMutator(LevelMutator):
+
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(self, rng: chex.PRNGKey, level: Level) -> Level:
+        return level
 
 
 @struct.dataclass
@@ -496,6 +508,23 @@ class IteratedLevelMutator(LevelMutator):
             level,
             jax.random.split(rng, self.num_steps),
         )
+        return level
+
+
+@struct.dataclass
+class ChainLevelMutator(LevelMutator):
+    mutators: tuple[LevelMutator, ...]
+
+
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def mutate_level(
+        self,
+        rng: chex.PRNGKey,
+        level: Level,
+    ) -> Level:
+        for mutator in self.mutators:
+            rng_mutate, rng = jax.random.split(rng)
+            level = mutator.mutate_level(rng, level)
         return level
 
 
@@ -547,12 +576,12 @@ class LevelSolution:
     Represent a solution to some level. All fields come from subclass.
     """
 
+
 @struct.dataclass
 class LevelSolutionProxies:
     """
     Represent a solution to some level. All fields come from subclass.
     """
-
 
 
 @struct.dataclass
@@ -587,6 +616,9 @@ class LevelSolver:
     
     @functools.partial(jax.jit, static_argnames=('self',))
     def level_value(self, soln: LevelSolution, level: Level) -> float:
+        # TODO: this is wrong, should not take in a level as input, should
+        # take the level from the soln, a soln is specific to a level right?
+        # if a different level is passed in this will give the wrong output.
         state = self.env._reset(level)
         return self.state_value(soln, state)
 

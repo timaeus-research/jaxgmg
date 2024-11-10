@@ -64,6 +64,12 @@ def run(
     plr_proxy_shaping: bool,
     proxy_name: str,
     plr_proxy_shaping_coeff: float,
+    clipping: bool,
+    eta_schedule: bool,
+    eta_schedule_time: float,
+    debug_stop_gradient: bool,
+    debug_stop_gradient_after: float,
+    debug_stop_gradient_oracle: bool,
     # ued config
     ued: str,
     prob_shift: float,
@@ -126,6 +132,19 @@ def run(
         print("WARNING: (proxy_value terms will be untrained)")
         print("WARNING: (this invalidates most estimators)")
     rng_train_levels, rng_setup = jax.random.split(rng_setup)
+    if eta_schedule:
+        eta_pretraining_duration = eta_schedule_time * num_total_cycles
+        eta_rampup_duration = 0.05 * num_total_cycles
+        plr_proxy_shaping_coeff = optax.linear_schedule(
+            init_value=0.0,
+            end_value=plr_proxy_shaping_coeff,
+            transition_begin=eta_pretraining_duration,
+            transition_steps=eta_rampup_duration,
+        )
+    else:
+        plr_proxy_shaping_coeff = optax.constant_schedule(
+            value=plr_proxy_shaping_coeff,
+        )
     if ued == "dr":
         gen = dr_infinite.CurriculumGenerator(
             level_generator=train_level_generator,
@@ -157,6 +176,7 @@ def run(
             proxy_shaping=plr_proxy_shaping,
             proxy_name=proxy_name,
             proxy_shaping_coeff=plr_proxy_shaping_coeff,
+            clipping=clipping,
         )
         gen_state = gen.init(
             rng=rng_train_levels,
@@ -181,6 +201,7 @@ def run(
             proxy_shaping=plr_proxy_shaping,
             proxy_name=proxy_name,
             proxy_shaping_coeff=plr_proxy_shaping_coeff,
+            clipping=clipping,
         )
         gen_state = gen.init(
             rng=rng_train_levels,
@@ -471,6 +492,11 @@ def run(
 
 
         # report experience and performance to level generator
+        scoring_method_override = None
+        if debug_stop_gradient:
+            if t >= debug_stop_gradient_after * num_total_cycles:
+                if debug_stop_gradient_oracle:
+                    scoring_method_override = 'oracle-actor'
         gen_state = gen.update(
             state=gen_state,
             levels=levels_t,
@@ -478,15 +504,25 @@ def run(
             # shortcut: we did gae already
             advantages=advantages,
             proxy_advantages=proxy_advantages,
+            step=t,
+            scoring_method_override=scoring_method_override
         )
         if log_cycle:
             ued_metrics = gen.compute_metrics(gen_state)
             metrics['ued'].update(ued_metrics)
+            metrics['ued'].update({
+                'eta': plr_proxy_shaping_coeff(t),
+            })
 
 
         # ppo update network on this data (if curriculum says so, else skip)
         rng_update, rng_t = jax.random.split(rng_t)
-        if gen.should_train(batch_type):
+        should_train = gen.should_train(batch_type=batch_type)
+        if debug_stop_gradient:
+            if t >= debug_stop_gradient_after * num_total_cycles:
+                should_train = False
+        if should_train:
+            progress.write(f"{t:2d} update ({batch_type=:d}) (scoring_method_override=)")
             if log_cycle:
                 ppo_start_time = time.perf_counter()
             train_state, ppo_metrics = ppo.update(
@@ -509,6 +545,8 @@ def run(
             step_counts['ppo-update'] += num_updates_per_cycle
             if log_cycle:
                 metrics['ppo'].update(ppo_metrics)
+        else:
+            progress.write(f"{t:2d} skip   {batch_type=:d}) (scoring_method_override=)")
         
 
         # periodic evaluations
