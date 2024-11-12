@@ -522,7 +522,7 @@ def run(
             if t >= debug_stop_gradient_after * num_total_cycles:
                 should_train = False
         if should_train:
-            progress.write(f"{t:2d} update ({batch_type=:d}) (scoring_method_override=)")
+            # progress.write(f"{t:2d} update ({batch_type=:d}) (scoring_method_override=)")
             if log_cycle:
                 ppo_start_time = time.perf_counter()
             train_state, ppo_metrics = ppo.update(
@@ -545,8 +545,8 @@ def run(
             step_counts['ppo-update'] += num_updates_per_cycle
             if log_cycle:
                 metrics['ppo'].update(ppo_metrics)
-        else:
-            progress.write(f"{t:2d} skip   {batch_type=:d}) (scoring_method_override=)")
+        # else:
+        #     progress.write(f"{t:2d} skip   {batch_type=:d}) (scoring_method_override=)")
         
 
         # periodic evaluations
