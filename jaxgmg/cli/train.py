@@ -1487,8 +1487,8 @@ def keys(
     env_layout: str = 'blocks',
     env_wall_prob: float = 0.25,
     env_num_keys: int = 3,
-    env_num_keys_shift: int = 8,
-    env_num_chests: int = 8,
+    env_num_keys_shift: int = 10,
+    env_num_chests: int = 10,
     env_num_chests_shift: int = 3,
     env_baselines: bool = False,
     obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
@@ -1657,13 +1657,25 @@ def keys(
 
     if env_baselines:
         print("configuring level solver...")
-        level_solver = keys_and_chests.PartialLevelSolver(
+        assert env_num_keys <= env_num_keys_shift
+        assert env_num_chests >= env_num_chests_shift
+        level_solver = keys_and_chests.LevelSolverFiltered(
             env=env,
             discount_rate=ppo_gamma,
+            min_keys=env_num_keys,
+            min_chests=env_num_chests_shift,
         )
     else:
         print("skipping level solver... (set --env-baselines to configure)")
         level_solver = None
+
+    
+    print("guarding hackery in autocurricula oracle stuff")
+    if "oracle" in plr_regret_estimator:
+        assert env_num_keys == 3, "assumed as part of hack"
+        assert env_num_chests_shift == 3, "assumed as part of hack"
+        assert env.penalize_time == False, "assumed as part of hack"
+        assert env.max_steps_in_episode == 128, "assumed as part of hack"
 
 
     print("configuring level metrics...")
