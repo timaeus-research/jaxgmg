@@ -216,6 +216,13 @@ def plr_compute_score(
                 discount_rate=discount_rate,
                 proxy_oracle=False,
             )
+        case "dro-actor":
+            original_score = dro_actor(
+                rewards=rollout.transitions.reward,
+                dones=rollout.transitions.done,
+                discount_rate=discount_rate,
+                max_ever_return=max_ever_return,
+            )
         case _:
             raise ValueError(f"Unknown scoring method {scoring_method!r}")
 
@@ -576,6 +583,27 @@ def regret_oracle_actor(
     )
 
     return oracle_max_return - average_return
+
+def dro_actor(
+    rewards: Array,             # float[num_steps]
+    dones: Array,               # bool[num_steps]
+    discount_rate: float,
+    max_ever_return: float,
+) -> float:
+    """
+    Estimate maximin score for a level from a single episode as
+
+         - sum_{t=0}^T \\gamma^t r_t.
+
+    That is, the empirical average return achieved by the policy is used for
+    the return of the policy.
+    """
+    average_return = experience.compute_average_return(
+        rewards=rewards,
+        dones=dones,
+        discount_rate=discount_rate,
+    )
+    return  -average_return
 
 
 # # # 
