@@ -1487,9 +1487,10 @@ def keys(
     env_layout: str = 'blocks',
     env_wall_prob: float = 0.25,
     env_num_keys: int = 3,
-    env_num_keys_shift: int = 15,
-    env_num_chests: int = 15,
-    env_num_chests_shift: int = 5,
+    env_num_keys_shift: int = 8,
+    env_num_chests: int = 8,
+    env_num_chests_shift: int = 3,
+    env_baselines: bool = False,
     obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
     img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
     env_penalize_time: bool = False,
@@ -1640,7 +1641,6 @@ def keys(
         }
 
     print("configuring level mutator...")
-
     level_mutator = IteratedLevelMutator(
             mutator=MixtureLevelMutator(
                 mutators=(
@@ -1655,7 +1655,15 @@ def keys(
         )
 
 
-    print("TODO: implement level solver...")
+    if env_baselines:
+        print("configuring level solver...")
+        level_solver = keys_and_chests.PartialLevelSolver(
+            env=env,
+            discount_rate=ppo_gamma,
+        )
+    else:
+        print("skipping level solver... (set --env-baselines to configure)")
+        level_solver = None
 
 
     print("configuring level metrics...")
@@ -1675,7 +1683,7 @@ def keys(
         seed=seed,
         env=env,
         train_level_generator=train_level_generator,
-        level_solver=None,
+        level_solver=level_solver,
         level_mutator=level_mutator,
         level_metrics=level_metrics,
         eval_level_generators=eval_level_generators,
@@ -2381,8 +2389,6 @@ def memory_test(
         max_num_checkpoints=max_num_checkpoints,
         num_cycles_per_checkpoint=num_cycles_per_checkpoint,
     )
-
-
 
 
 @util.wandb_run
