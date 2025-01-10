@@ -1033,9 +1033,9 @@ class LevelSolverFiltered(LevelSolverInit):
     def solve(self, level: Level) -> LevelSolutionInit:
         # solve after filtering out hidden keys
         value_filtered_keys = _evaluate_all_visitation_sequences(
-            level=level.update(
+            level=level.replace(
                 keys_pos=level.keys_pos[:self.min_keys],
-                hidden_keys=level.hidden_keys[:self.hidden_keys],
+                hidden_keys=level.hidden_keys[:self.min_keys],
                 # inventory map?
             ),
             discount_rate=self.discount_rate,
@@ -1044,9 +1044,9 @@ class LevelSolverFiltered(LevelSolverInit):
         )
         # solve after filtering out hidden chests
         value_filtered_chests = _evaluate_all_visitation_sequences(
-            level=level.update(
+            level=level.replace(
                 chests_pos=level.chests_pos[:self.min_chests],
-                hidden_chests=level.hidden_chests[:self.hidden_chests],
+                hidden_chests=level.hidden_chests[:self.min_chests],
             ),
             discount_rate=self.discount_rate,
             penalize_time=self.env.penalize_time,
@@ -1102,12 +1102,15 @@ def _evaluate_all_visitation_sequences(
     # hidden keys/chests are unreachable, give them infinite distance (this
     # means any visitation sequence that uses them will get 0 reward for it)
     hidden = jnp.concatenate((
-        [False],
+        jnp.array([False]),
         level.hidden_keys,
         level.hidden_chests,
     ))
-    dists = dists.at[hidden,:].set(jnp.inf)
-    dists = dists.at[:,hidden].set(jnp.inf)
+    dists = jnp.where(
+        hidden | hidden[jnp.newaxis],
+        jnp.inf,
+        dists,
+    )
 
     # enumerate visitation sequences that could plausibly be optimal
     sequences_of_keys = combinatorix.permutations(K, N)
@@ -1119,23 +1122,23 @@ def _evaluate_all_visitation_sequences(
     # vmap the evaluation function over the cartesian triple product of
     # the above arrays, i.e. over all combinations of one sequence of
     # keys, one sequence of chests, and one interleaving sequence.
-    ev = functools.partial(
-        _evaluate_visitation_sequence,
-        dists=dists,
-        num_keys=K,
-        discount_rate=discount_rate,
-        penalize_time=penalize_time,
-        max_steps_in_episode=max_steps_in_episode,
-    )
-    v1 = jax.vmap(ev, in_axes=(None, None, 0)) # :   N,   N, Z 2N ->     Z
-    v2 = jax.vmap(v1, in_axes=(None, 0, None)) # :   N, Y N, Z 2N ->   Y Z
-    v3 = jax.vmap(v2, in_axes=(0, None, None)) # : X N, Y N, Z 2N -> X Y Z
-
-    # apply the vmapped function to get an array of values
+    # ev : *etc, int[   N], int[   N], bool[   2N], *etc. -> float[]
+    # v1 : *etc, int[   N], int[   N], bool[Z, 2N], *etc. -> float[Z]
+    # v2 : *etc, int[   N], int[Y, N], bool[Z, 2N], *etc. -> float[Y, Z]
+    # v3 : *etc, int[X, N], int[Y, N], bool[Z, 2N], *etc. -> float[X, Y, Z]
+    ev = _evaluate_visitation_sequence
+    v1 = jax.vmap(ev, in_axes=(None, None, None, None, 0, None, None, None))
+    v2 = jax.vmap(v1, in_axes=(None, None, None, 0, None, None, None, None))
+    v3 = jax.vmap(v2, in_axes=(None, None, 0, None, None, None, None, None))
     values = v3(
+        dists,
+        K,
         sequences_of_keys,
         sequences_of_chests,
         sequences_of_which,
+        discount_rate,
+        penalize_time,
+        max_steps_in_episode,
     ) # -> float[X, Y, Z]
 
     # report the best value available
@@ -1151,7 +1154,7 @@ def _evaluate_visitation_sequence(
     sequence_of_keys_or_chests: chex.Array,
     discount_rate: float,
     penalize_time: bool,
-    max_steps_per_episode: int,
+    max_steps_in_episode: int,
 ) -> float:
     """
     Simulate a rollout from the initial state of the level and compute how much
@@ -1256,7 +1259,7 @@ def _evaluate_visitation_sequence(
         discount_factor = jnp.where(
             jnp.isinf(new_cumulative_distance),
             0.0, # even if discount rate is 1.0, no reward from inf dist
-            self.discount_rate ** new_cumulative_distance,
+            discount_rate ** new_cumulative_distance,
         )
         discounted_reward = raw_reward * discount_factor
         # modify reward based on environment configuration

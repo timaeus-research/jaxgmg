@@ -1659,6 +1659,8 @@ def keys(
         print("configuring level solver...")
         assert env_num_keys <= env_num_keys_shift
         assert env_num_chests >= env_num_chests_shift
+        print("min_keys:", env_num_keys)
+        print("min_chests:", env_num_chests_shift)
         level_solver = keys_and_chests.LevelSolverFiltered(
             env=env,
             discount_rate=ppo_gamma,
@@ -1670,8 +1672,8 @@ def keys(
         level_solver = None
 
     
-    print("guarding hackery in autocurricula oracle stuff")
     if "oracle" in plr_regret_estimator:
+        print("assertions guarding the hacks in autocurricula scoring module...")
         assert env_num_keys == 3, "assumed as part of hack"
         assert env_num_chests_shift == 3, "assumed as part of hack"
         assert env.penalize_time == False, "assumed as part of hack"
