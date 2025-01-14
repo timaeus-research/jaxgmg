@@ -1490,7 +1490,7 @@ def keys(
     env_num_keys_shift: int = 10,
     env_num_chests: int = 10,
     env_num_chests_shift: int = 3,
-    env_baselines: bool = False,
+    env_baselines: bool = True,             # turn off if too slow
     obs_level_of_detail: int = 0,           # 0 = bool; 1, 3, 4, or 8 = rgb
     img_level_of_detail: int = 1,           # obs_ is for train, img_ for gifs
     env_penalize_time: bool = False,
@@ -1516,7 +1516,7 @@ def keys(
     num_mutate_steps: int = 12,
     prob_mutate_shift: float = 0.0,
     chain_mutate: bool = True,
-    mutate_cheese: bool = True,
+    mutate_keys_ratio: bool = True,
     # for proxy augmented methods
     train_proxy_critic: bool = False,
     plr_proxy_shaping: bool = False,
@@ -1641,15 +1641,71 @@ def keys(
         }
 
     print("configuring level mutator...")
-    level_mutator = IteratedLevelMutator(
+    if mutate_keys_ratio:
+        biased_keys_mutator = MixtureLevelMutator(
+            mutators=(
+                # make keys/chests ratio like orig levels
+                keys_and_chests.KeysChestsRatioLevelMutator(
+                    num_keys=env_num_keys,
+                    num_chests=env_num_chests,
+                ),
+                # make keys/chests ratio like shift levels
+                keys_and_chests.KeysChestsRatioLevelMutator(
+                    num_keys=env_num_keys_shift,
+                    num_chests=env_num_chests_shift,
+                ),
+            ),
+            mixing_probs=(1-prob_mutate_shift, prob_mutate_shift),
+        )
+    else:
+        # replace this mutation with something else
+        biased_keys_mutator = keys_and_chests.ToggleWallLevelMutator()
+    # overall
+    if chain_mutate:
+        level_mutator = ChainLevelMutator(mutators=(
+            # mutate walls (n-4 steps)
+            IteratedLevelMutator(
+                mutator=keys_and_chests.ToggleWallLevelMutator(),
+                num_steps=num_mutate_steps - 4,
+            ),
+            # maybe scatter mouse (1 step) else another wall toggle
+            MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ScatterMouseLevelMutator(),
+                    keys_and_chests.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # maybe scatter keys
+            MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ScatterKeyLevelMutator(),
+                    keys_and_chests.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # maybe scatter chest
+            MixtureLevelMutator(
+                mutators=(
+                    keys_and_chests.ScatterChestLevelMutator(),
+                    keys_and_chests.ToggleWallLevelMutator(),
+                ),
+                mixing_probs=(1/2,1/2),
+            ),
+            # biased scatter keys (1 step)
+            biased_keys_mutator,
+        ))
+    else:
+        level_mutator = IteratedLevelMutator(
             mutator=MixtureLevelMutator(
                 mutators=(
                     keys_and_chests.ToggleWallLevelMutator(),
                     keys_and_chests.ScatterMouseLevelMutator(),
                     keys_and_chests.ScatterChestLevelMutator(),
                     keys_and_chests.ScatterKeyLevelMutator(),
+                    biased_keys_mutator,
                 ),
-                mixing_probs=(7/12, 1/12, 2/12, 2/12),
+                mixing_probs=(8/12, 1/12, 1/12, 1/12, 1/12),
             ),
             num_steps=num_mutate_steps,
         )

@@ -17,6 +17,7 @@ from jaxgmg.environments import cheese_on_a_pile
 from jaxgmg.environments import keys_and_chests
 from jaxgmg.environments import minigrid_maze
 from jaxgmg.environments.base import MixtureLevelMutator, IteratedLevelMutator
+from jaxgmg.environments.base import ChainLevelMutator
 from jaxgmg import util
 
 
@@ -348,10 +349,10 @@ def keys(
     height: int                 = 9,
     width: int                  = 9,
     layout: str                 = 'tree',
-    env_num_keys: int = 3,
-    env_num_keys_shift: int = 6,
-    env_num_chests: int = 6,
-    env_num_chests_shift: int = 3,
+    env_num_keys: int           = 3,
+    env_num_keys_shift: int     = 6,
+    env_num_chests: int         = 6,
+    env_num_chests_shift: int   = 3,
     level_of_detail: int        = 8,
     num_mutate_steps: int       = 1,
     prob_mutate_shift: float    = 0.0,
@@ -377,24 +378,33 @@ def keys(
         maze_generator=maze_generation.get_generator_class_from_name(
             name=layout
         )(),
-        num_keys=env_num_keys_shift,
+        num_keys=env_num_keys,
         num_keys_max=env_num_keys_max,
-        num_chests=env_num_chests_shift,
+        num_chests=env_num_chests,
         num_chests_max=env_num_chests_max,
     )
-    # if mutating cheese, mostly stay in the restricted region
-    level_mutator = IteratedLevelMutator(
-            mutator=MixtureLevelMutator(
+    level_mutator = ChainLevelMutator(
+        mutators=(
+            keys_and_chests.ToggleWallLevelMutator(),
+            keys_and_chests.ToggleWallLevelMutator(),
+            keys_and_chests.ScatterMouseLevelMutator(),
+            keys_and_chests.ScatterChestLevelMutator(),
+            keys_and_chests.ScatterKeyLevelMutator(),
+            MixtureLevelMutator(
                 mutators=(
-                    keys_and_chests.ToggleWallLevelMutator(),
-                    keys_and_chests.ScatterMouseLevelMutator(),
-                    keys_and_chests.ScatterChestLevelMutator(),
-                    keys_and_chests.ScatterKeyLevelMutator(),
+                    keys_and_chests.KeysChestsRatioLevelMutator(
+                        num_keys=env_num_keys,
+                        num_chests=env_num_chests,
+                    ),
+                    keys_and_chests.KeysChestsRatioLevelMutator(
+                        num_keys=env_num_keys_shift,
+                        num_chests=env_num_chests_shift,
+                    ),
                 ),
-                mixing_probs=(7/12, 1/12, 2/12, 2/12),
+                mixing_probs=(1/2, 1/2),
             ),
-            num_steps=num_mutate_steps,
-        )
+        ),
+    )
     mutate_forever(
         rng=rng,
         env=env,
