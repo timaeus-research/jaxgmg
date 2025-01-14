@@ -166,7 +166,7 @@ def keys(
         env=env,
         discount_rate=discount_rate,
     )
-    partial_level_solver = keys_and_chests.PartialLevelSolver(
+    partial_level_solver = keys_and_chests.LevelSolverInit(
         env=env,
         discount_rate=discount_rate,
     )
