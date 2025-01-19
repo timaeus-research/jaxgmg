@@ -578,6 +578,8 @@ def dish(
 
 
     print("configuring environment...")
+    if 'oracle' in plr_regret_estimator:
+        assert not env_terminate_after_dish, "assumed False hack in scores.py"
     env = cheese_on_a_dish.Env(
         terminate_after_cheese_and_dish=env_terminate_after_dish,
         num_channels_cheese=num_channels_cheese,

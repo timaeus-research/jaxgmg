@@ -510,14 +510,26 @@ def regret_oracle_actor(
         oracle_max_return = discount_rate ** goal_dist
     elif isinstance(level, cheese_on_a_dish.Level):
         if not proxy_oracle:
-            goal_dist = maze_solving.maze_distances(level.wall_map)[
+            wall_map = level.wall_map.at[
+                level.dish_pos[0],
+                level.dish_pos[1],
+            ].set(
+                (level.dish_pos != level.cheese_pos).any()
+            )
+            goal_dist = maze_solving.maze_distances(wall_map)[
                 level.initial_mouse_pos[0],
                 level.initial_mouse_pos[1],
                 level.cheese_pos[0],
                 level.cheese_pos[1],
             ]
         else:
-            goal_dist = maze_solving.maze_distances(level.wall_map)[
+            wall_map = level.wall_map.at[
+                level.cheese_pos[0],
+                level.cheese_pos[1],
+            ].set(
+                (level.dish_pos != level.cheese_pos).any()
+            )
+            goal_dist = maze_solving.maze_distances(wall_map)[
                 level.initial_mouse_pos[0],
                 level.initial_mouse_pos[1],
                 level.dish_pos[0],
@@ -583,6 +595,7 @@ def regret_oracle_actor(
     )
 
     return oracle_max_return - average_return
+
 
 def dro_actor(
     rewards: Array,             # float[num_steps]
