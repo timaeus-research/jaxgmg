@@ -170,7 +170,7 @@ app.add_typer(make_typer_app(
     help=solve.__doc__,
     subcommands=(
         solve.corner,
-        # solve.dish, # not yet implemented
+        solve.dish,
         # solve.follow, # not yet implemented
         solve.keys,
         # solve.lava, # not yet implemented

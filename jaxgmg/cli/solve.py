@@ -8,7 +8,7 @@ import chex
 from jaxgmg.procgen import maze_generation
 from jaxgmg.environments import base
 from jaxgmg.environments import cheese_in_the_corner
-# from jaxgmg.environments import cheese_on_a_dish
+from jaxgmg.environments import cheese_on_a_dish
 from jaxgmg.environments import keys_and_chests
 # from jaxgmg.environments import monster_world
 # from jaxgmg.environments import lava_land
@@ -109,6 +109,54 @@ def corner(
         corner_size=corner_size,
     )
     level_solver = cheese_in_the_corner.LevelSolver(
+        env=env,
+        discount_rate=discount_rate,
+    )
+
+    solve_forever(
+        rng=rng,
+        env=env,
+        level_generator=level_generator,
+        level_solver=level_solver,
+        fps=fps,
+        debug=debug,
+    )
+
+
+def dish(
+    height: int                 = 13,
+    width: int                  = 13,
+    cheese_on_dish: bool        = True,
+    layout: str                 = 'tree',
+    penalize_time: bool         = True,
+    max_steps_in_episode: int   = 128,
+    discount_rate: float        = 0.995,
+    level_of_detail: int        = 8,
+    seed: int                   = 42,
+    fps: float                  = 8,
+    debug: bool                 = False,
+):
+    """
+    Demonstrate optimal solution for random Cheese on a Dish levels.
+    """
+    util.print_config(locals())
+
+    print("initialising environment, generator, and solver...")
+    rng = jax.random.PRNGKey(seed=seed)
+    env = cheese_on_a_dish.Env(
+        obs_level_of_detail=level_of_detail,
+        penalize_time=penalize_time,
+        max_steps_in_episode=max_steps_in_episode,
+    )
+    level_generator = cheese_on_a_dish.LevelGenerator(
+        height=height,
+        width=width,
+        maze_generator=maze_generation.get_generator_class_from_name(
+            name=layout,
+        )(),
+        cheese_on_dish=cheese_on_dish,
+    )
+    level_solver = cheese_on_a_dish.LevelSolver(
         env=env,
         discount_rate=discount_rate,
     )
