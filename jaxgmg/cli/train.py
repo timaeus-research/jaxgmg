@@ -240,7 +240,7 @@ def corner(
     else:
         eval_level_generators = {
             "orig": orig_level_generator,
-            #"shift": shift_level_generator,
+            "shift": shift_level_generator,
             "tree": tree_level_generator,
         }
 
