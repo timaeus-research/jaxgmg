@@ -243,7 +243,7 @@ def run(
             f"{checkpoint_folder.replace('/','-')}-{checkpoint_number}",
             f'{eval_name}.csv',
         )
-        os.path.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
             print("i,j,return", file=f)
             for r, i, j in zip(returns, eval_obj.levels_pos[0], eval_obj.levels_pos[1]):
