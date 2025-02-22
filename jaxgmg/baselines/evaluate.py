@@ -172,7 +172,6 @@ def run(
         #     evals_dict[eval_name] = solo_eval
 
 
-
     print("configuring actor critic network...")
     # select architecture
     print(f"  {net_cnn_type=}")
@@ -236,9 +235,17 @@ def run(
             net_init_state=net_init_state,
         )
         returns = results['returns']
-        print(f"{eval_name} = {{")
-        for r, i, j in zip(returns, eval_obj.levels_pos[0], eval_obj.levels_pos[1]):
-            print(f"  ({i}, {j}): {r},")
-        print(f"}}")
+        
+        
+        # saving the evaluation
+        path = os.path.join(
+            'evaluations',
+            f"{checkpoint_folder.replace('/','-')}-{checkpoint_number}",
+            f'{eval_name}.csv',
+        )
+        with open(path, 'w') as f:
+            print("i,j,return", file=f)
+            for r, i, j in zip(returns, eval_obj.levels_pos[0], eval_obj.levels_pos[1]):
+                print(f"{i},{j},{r}", file=f)
 
 
