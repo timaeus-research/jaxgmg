@@ -35,7 +35,7 @@ def corner(
     evals_num_env_steps: int = 512,
     evals_num_levels: int = 256,
     gif_grid_width: int = 16,
-    level_splayer: str = 'mouse',           # or 'cheese' or 'cheese-and-mouse'
+    level_splayer: str = 'cheese',           # or 'mouse' or 'cheese-and-mouse'
     # other
     seed: int = 42,
 ):
