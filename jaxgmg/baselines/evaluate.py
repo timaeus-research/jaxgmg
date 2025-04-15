@@ -116,22 +116,38 @@ def run(
     print(f"configuring evals for {len(fixed_eval_levels)} fixed eval levels...")
     for level_name, level in fixed_eval_levels.items():
         print(f"  registering fixed level {level_name!r}")
-        print("  splaying level for heatmap evals...")
-        levels, num_levels, levels_pos, grid_shape = (
-            heatmap_splayer_fn(level)
-        )
-        rollout_eval = evals.RolloutHeatmapDataEval(
-            levels=levels,
-            num_levels=num_levels,
-            levels_pos=levels_pos,
-            grid_shape=grid_shape,
+        # SINGLE ANIMATION EVAL
+        rollouts_eval = evals.AnimatedRolloutsEval(
+            num_levels=1,
+            levels=jax.tree.map(
+                lambda x: x[None],
+                level,
+            ),
+            num_steps=env.max_steps_in_episode,
+            gif_grid_width=1,
             env=env,
-            discount_rate=ppo_gamma,
-            num_steps=evals_num_env_steps,
             period=1,
         )
         eval_name = f"fixed-{level_name}"
-        evals_dict[eval_name] = rollout_eval
+        evals_dict[eval_name] = rollouts_eval
+        # HEATMAP EVALS
+        # print("  splaying level for heatmap evals...")
+        # levels, num_levels, levels_pos, grid_shape = (
+        #     heatmap_splayer_fn(level)
+        # )
+        # rollout_eval = evals.RolloutHeatmapDataEval(
+        #     levels=levels,
+        #     num_levels=num_levels,
+        #     levels_pos=levels_pos,
+        #     grid_shape=grid_shape,
+        #     env=env,
+        #     discount_rate=ppo_gamma,
+        #     num_steps=evals_num_env_steps,
+        #     period=1,
+        # )
+        # eval_name = f"fixed-{level_name}"
+        # evals_dict[eval_name] = rollout_eval
+        # EVALS WE USED IN TRAINING
         # solo_eval = evals.SingleLevelEval(
         #     num_steps=evals_num_env_steps,
         #     discount_rate=ppo_gamma,
