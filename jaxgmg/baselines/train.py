@@ -329,7 +329,7 @@ def run(
         rng=rng_model_init,
         obs_type=env.obs_type(level=example_level),
     )
-    param_count = sum(p.size for p in jax.tree_leaves(net_init_params))
+    param_count = sum(p.size for p in jax.tree.leaves(net_init_params))
     print("  number of parameters:", param_count)
 
 
